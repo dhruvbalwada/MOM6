@@ -37,6 +37,7 @@ public thickness_diffuse_get_KH
 type, public :: thickness_diffuse_CS ; private
   logical :: initialized = .false. !< True if this control structure has been initialized.
   real    :: Khth                !< Background isopycnal depth diffusivity [L2 T-1 ~> m2 s-1]
+  real    :: Khth_11, Khth_12, Khth_21, Khth_22    !< Background isopycnal depth diffusivity tensor elements [L2 T-1 ~> m2 s-1]
   real    :: Khth_Slope_Cff      !< Slope dependence coefficient of Khth [nondim]
   real    :: max_Khth_CFL        !< Maximum value of the diffusive CFL for isopycnal height diffusion [nondim]
   real    :: Khth_Min            !< Minimum value of Khth [L2 T-1 ~> m2 s-1]
@@ -48,6 +49,9 @@ type, public :: thickness_diffuse_CS ; private
   real    :: kappa_smooth        !< Vertical diffusivity used to interpolate more
                                  !! sensible values of T & S into thin layers [Z2 T-1 ~> m2 s-1].
   logical :: thickness_diffuse   !< If true, interfaces heights are diffused.
+  !! DB 
+  logical :: USE_KHTH_TENSOR     !< If true, interface heights are diffused using 2X2 tensor
+  !!
   logical :: use_FGNV_streamfn   !< If true, use the streamfunction formulation of
                                  !! Ferrari et al., 2010, which effectively emphasizes
                                  !! graver vertical modes by smoothing in the vertical.
@@ -152,6 +156,12 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
                   ! weighting of the interface slopes to that calculated also
                   ! using density gradients at v points.  The physically correct
                   ! slopes occur at 0, while 1 is used for numerical closures [nondim].
+  !! DB added
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1) :: &
+    KH_ux, KH_uy  ! Isopycnal height tensor diffusivities in u-columns for x and y gradients [L2 T-1 ~> m2 s-1] 
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1) :: &
+    KH_vx, KH_vy  ! Isopycnal height tensor diffusivities in v-columns for x and y gradients [L2 T-1 ~> m2 s-1]
+  !!
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: &
     KH_t          ! diagnosed diffusivity at tracer points [L2 T-1 ~> m2 s-1]
 
@@ -222,7 +232,7 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   ! Calculates interface heights, e, in [Z ~> m].
   call find_eta(h, tv, G, GV, US, e, halo_size=1)
 
-  ! Set the diffusivities.
+  ! Set the U diffusivities.
   !$OMP parallel default(shared)
   if (.not. CS%read_khth) then
     !$OMP do
@@ -823,6 +833,8 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
   EOSdom_v(:) = EOS_domain(G%HI)
   EOSdom_h1(:) = EOS_domain(G%HI, halo=1)
 
+  ! Calculate the zonal fluxes and gradients.
+  
   !$OMP parallel do default(none) shared(nz,is,ie,js,je,find_work,use_EOS,G,GV,US,pres,T,S, &
   !$OMP                                  nk_linear,IsdB,tv,h,h_neglect,e,dz_neglect,I_slope_max2, &
   !$OMP                                  h_neglect2,int_slope_u,KH_u,uhtot,h_frac,h_avail_rsum, &
@@ -847,7 +859,6 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
       calc_derivatives = use_EOS .and. (k >= nk_linear) .and. &
          (find_work .or. .not. present_slope_x .or. CS%use_FGNV_streamfn .or. use_stanley)
 
-      ! Calculate the zonal fluxes and gradients.
       if (calc_derivatives) then
         do I=is-1,ie
           pres_u(I) = 0.5*(pres(i,j,K) + pres(i+1,j,K))
@@ -888,6 +899,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
         elseif (find_work) then ! This is used in pure stacked SW mode
           drdkDe_u(I,K) = drdkR * e(i+1,j,K) - drdkL * e(i,j,K)
         endif
+        
         if (use_stanley) then
           ! Correction to the horizontal density gradient due to nonlinearity in
           ! the EOS rectifying SGS temperature anomalies
@@ -1053,12 +1065,12 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
                            -h_avail(i+1,j,k))
 
           if (CS%id_sfn_x>0) diag_sfn_x(I,j,K) = diag_sfn_x(I,j,K+1) + uhD(I,j,k)
-!         sfn_x(I,j,K) = max(min(Sfn_in_h, uhtot(I,j)+h_avail(i,j,k)), &
-!                            uhtot(I,j)-h_avail(i+1,j,K))
-!         sfn_slope_x(I,j,K) = max(uhtot(I,j)-h_avail(i+1,j,k), &
-!                                  min(uhtot(I,j)+h_avail(i,j,k), &
-!               min(h_avail_rsum(i+1,j,K), max(-h_avail_rsum(i,j,K), &
-!               (KH_u(I,j,K)*G%dy_Cu(I,j)) * ((e(i,j,K)-e(i+1,j,K))*G%IdxCu(I,j)) )) ))
+  !         sfn_x(I,j,K) = max(min(Sfn_in_h, uhtot(I,j)+h_avail(i,j,k)), &
+  !                            uhtot(I,j)-h_avail(i+1,j,K))
+  !         sfn_slope_x(I,j,K) = max(uhtot(I,j)-h_avail(i+1,j,k), &
+  !                                  min(uhtot(I,j)+h_avail(i,j,k), &
+  !               min(h_avail_rsum(i+1,j,K), max(-h_avail_rsum(i,j,K), &
+  !               (KH_u(I,j,K)*G%dy_Cu(I,j)) * ((e(i,j,K)-e(i+1,j,K))*G%IdxCu(I,j)) )) ))
         else ! k <= nk_linear
           ! Balance the deeper flow with a return flow uniformly distributed
           ! though the remaining near-surface layers.  This is the same as
@@ -1071,11 +1083,11 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
           endif
 
           if (CS%id_sfn_x>0) diag_sfn_x(I,j,K) = diag_sfn_x(I,j,K+1) + uhD(I,j,k)
-!         if (sfn_slope_x(I,j,K+1) <= 0.0) then
-!           sfn_slope_x(I,j,K) = sfn_slope_x(I,j,K+1) * (1.0 - h_frac(i,j,k))
-!         else
-!           sfn_slope_x(I,j,K) = sfn_slope_x(I,j,K+1) * (1.0 - h_frac(i+1,j,k))
-!         endif
+  !         if (sfn_slope_x(I,j,K+1) <= 0.0) then
+  !           sfn_slope_x(I,j,K) = sfn_slope_x(I,j,K+1) * (1.0 - h_frac(i,j,k))
+  !         else
+  !           sfn_slope_x(I,j,K) = sfn_slope_x(I,j,K+1) * (1.0 - h_frac(i+1,j,k))
+  !         endif
         endif
 
         uhtot(I,j) = uhtot(I,j) + uhD(I,j,k)
@@ -1333,12 +1345,12 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
           vhD(i,J,k) = max(min((Sfn_in_H - vhtot(i,J)), h_avail(i,j,k)), -h_avail(i,j+1,k))
 
           if (CS%id_sfn_y>0) diag_sfn_y(i,J,K) = diag_sfn_y(i,J,K+1) + vhD(i,J,k)
-!         sfn_y(i,J,K) = max(min(Sfn_in_h, vhtot(i,J)+h_avail(i,j,k)), &
-!                            vhtot(i,J)-h_avail(i,j+1,k))
-!         sfn_slope_y(i,J,K) = max(vhtot(i,J)-h_avail(i,j+1,k), &
-!                                  min(vhtot(i,J)+h_avail(i,j,k), &
-!               min(h_avail_rsum(i,j+1,K), max(-h_avail_rsum(i,j,K), &
-!               (KH_v(i,J,K)*G%dx_Cv(i,J)) * ((e(i,j,K)-e(i,j+1,K))*G%IdyCv(i,J)) )) ))
+  !         sfn_y(i,J,K) = max(min(Sfn_in_h, vhtot(i,J)+h_avail(i,j,k)), &
+  !                            vhtot(i,J)-h_avail(i,j+1,k))
+  !         sfn_slope_y(i,J,K) = max(vhtot(i,J)-h_avail(i,j+1,k), &
+  !                                  min(vhtot(i,J)+h_avail(i,j,k), &
+  !               min(h_avail_rsum(i,j+1,K), max(-h_avail_rsum(i,j,K), &
+  !               (KH_v(i,J,K)*G%dx_Cv(i,J)) * ((e(i,j,K)-e(i,j+1,K))*G%IdyCv(i,J)) )) ))
         else ! k <= nk_linear
           ! Balance the deeper flow with a return flow uniformly distributed
           ! though the remaining near-surface layers.  This is the same as
@@ -1351,11 +1363,11 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
           endif
 
           if (CS%id_sfn_y>0) diag_sfn_y(i,J,K) = diag_sfn_y(i,J,K+1) + vhD(i,J,k)
-!         if (sfn_slope_y(i,J,K+1) <= 0.0) then
-!           sfn_slope_y(i,J,K) = sfn_slope_y(i,J,K+1) * (1.0 - h_frac(i,j,k))
-!         else
-!           sfn_slope_y(i,J,K) = sfn_slope_y(i,J,K+1) * (1.0 - h_frac(i,j+1,k))
-!         endif
+  !         if (sfn_slope_y(i,J,K+1) <= 0.0) then
+  !           sfn_slope_y(i,J,K) = sfn_slope_y(i,J,K+1) * (1.0 - h_frac(i,j,k))
+  !         else
+  !           sfn_slope_y(i,J,K) = sfn_slope_y(i,J,K+1) * (1.0 - h_frac(i,j+1,k))
+  !         endif
         endif
 
         vhtot(i,J) = vhtot(i,J)  + vhD(i,J,k)
@@ -1891,53 +1903,53 @@ subroutine add_detangling_Kh(h, e, Kh_u, Kh_v, KH_u_CFL, KH_v_CFL, tv, dt, G, GV
         endif ; enddo ; enddo  ! i- and K-loops
 
       ! This code tests the solutions...
-!     do i=ish,ie
-!       Sfn(:) = 0.0 ; uh_here(:) = 0.0
-!       do K=k_top,nz
-!         if ((Kh(i,K) > Kh_bg(i,K)) .or. (Kh(i,K+1) > Kh_bg(i,K+1))) then
-!           if (n==1) then ! u-point.
-!             if ((h(i+1,j,k) - h(i,j,k)) * &
-!                 ((e(i+1,j,K)-e(i+1,j,K+1)) - (e(i,j,K)-e(i,j,K+1))) > 0.0) then
-!               Sfn(K) = -Kh(i,K) * (e(i+1,j,K)-e(i,j,K)) * G%IdxCu(I,j)
-!               Sfn(K+1) = -Kh(i,K+1) * (e(i+1,j,K+1)-e(i,j,K+1)) * G%IdxCu(I,j)
-!               uh_here(k) = (Sfn(K) - Sfn(K+1))*G%dy_Cu(I,j)
-!               if (abs(uh_here(k)) * min(G%IareaT(i,j), G%IareaT(i+1,j)) > &
-!                   (1e-10*GV%m_to_H)) then
-!                 if (uh_here(k) * (h(i+1,j,k) - h(i,j,k)) > 0.0) then
-!                   call MOM_error(WARNING, "Corrective u-transport is up the thickness gradient.", .true.)
-!                 endif
-!                 if (((h(i,j,k) - 4.0*dt*G%IareaT(i,j)*uh_here(k)) - &
-!                      (h(i+1,j,k) + 4.0*dt*G%IareaT(i+1,j)*uh_here(k))) * &
-!                     (h(i,j,k) - h(i+1,j,k)) < 0.0) then
-!                   call MOM_error(WARNING, "Corrective u-transport is too large.", .true.)
-!                 endif
-!               endif
-!             endif
-!           else ! v-point
-!             if ((h(i,j+1,k) - h(i,j,k)) * &
-!                 ((e(i,j+1,K)-e(i,j+1,K+1)) - (e(i,j,K)-e(i,j,K+1))) > 0.0) then
-!               Sfn(K) = -Kh(i,K) * (e(i,j+1,K)-e(i,j,K)) * G%IdyCv(i,J)
-!               Sfn(K+1) = -Kh(i,K+1) * (e(i,j+1,K+1)-e(i,j,K+1)) * G%IdyCv(i,J)
-!               uh_here(k) = (Sfn(K) - Sfn(K+1))*G%dx_Cv(i,J)
-!               if (abs(uh_here(K)) * min(G%IareaT(i,j), G%IareaT(i,j+1)) > &
-!                   (1e-10*GV%m_to_H)) then
-!                 if (uh_here(K) * (h(i,j+1,k) - h(i,j,k)) > 0.0) then
-!                   call MOM_error(WARNING, &
-!                          "Corrective v-transport is up the thickness gradient.", .true.)
-!                 endif
-!                 if (((h(i,j,k) - 4.0*dt*G%IareaT(i,j)*uh_here(K)) - &
-!                      (h(i,j+1,k) + 4.0*dt*G%IareaT(i,j+1)*uh_here(K))) * &
-!                     (h(i,j,k) - h(i,j+1,k)) < 0.0) then
-!                   call MOM_error(WARNING, &
-!                          "Corrective v-transport is too large.", .true.)
-!                 endif
-!               endif
-!             endif
-!           endif ! u- or v- selection.
-!          !  de_dx(I,K) = (e(i+1,j,K)-e(i,j,K)) * G%IdxCu(I,j)
-!         endif
-!       enddo
-!     enddo
+  !     do i=ish,ie
+  !       Sfn(:) = 0.0 ; uh_here(:) = 0.0
+  !       do K=k_top,nz
+  !         if ((Kh(i,K) > Kh_bg(i,K)) .or. (Kh(i,K+1) > Kh_bg(i,K+1))) then
+  !           if (n==1) then ! u-point.
+  !             if ((h(i+1,j,k) - h(i,j,k)) * &
+  !                 ((e(i+1,j,K)-e(i+1,j,K+1)) - (e(i,j,K)-e(i,j,K+1))) > 0.0) then
+  !               Sfn(K) = -Kh(i,K) * (e(i+1,j,K)-e(i,j,K)) * G%IdxCu(I,j)
+  !               Sfn(K+1) = -Kh(i,K+1) * (e(i+1,j,K+1)-e(i,j,K+1)) * G%IdxCu(I,j)
+  !               uh_here(k) = (Sfn(K) - Sfn(K+1))*G%dy_Cu(I,j)
+  !               if (abs(uh_here(k)) * min(G%IareaT(i,j), G%IareaT(i+1,j)) > &
+  !                   (1e-10*GV%m_to_H)) then
+  !                 if (uh_here(k) * (h(i+1,j,k) - h(i,j,k)) > 0.0) then
+  !                   call MOM_error(WARNING, "Corrective u-transport is up the thickness gradient.", .true.)
+  !                 endif
+  !                 if (((h(i,j,k) - 4.0*dt*G%IareaT(i,j)*uh_here(k)) - &
+  !                      (h(i+1,j,k) + 4.0*dt*G%IareaT(i+1,j)*uh_here(k))) * &
+  !                     (h(i,j,k) - h(i+1,j,k)) < 0.0) then
+  !                   call MOM_error(WARNING, "Corrective u-transport is too large.", .true.)
+  !                 endif
+  !               endif
+  !             endif
+  !           else ! v-point
+  !             if ((h(i,j+1,k) - h(i,j,k)) * &
+  !                 ((e(i,j+1,K)-e(i,j+1,K+1)) - (e(i,j,K)-e(i,j,K+1))) > 0.0) then
+  !               Sfn(K) = -Kh(i,K) * (e(i,j+1,K)-e(i,j,K)) * G%IdyCv(i,J)
+  !               Sfn(K+1) = -Kh(i,K+1) * (e(i,j+1,K+1)-e(i,j,K+1)) * G%IdyCv(i,J)
+  !               uh_here(k) = (Sfn(K) - Sfn(K+1))*G%dx_Cv(i,J)
+  !               if (abs(uh_here(K)) * min(G%IareaT(i,j), G%IareaT(i,j+1)) > &
+  !                   (1e-10*GV%m_to_H)) then
+  !                 if (uh_here(K) * (h(i,j+1,k) - h(i,j,k)) > 0.0) then
+  !                   call MOM_error(WARNING, &
+  !                          "Corrective v-transport is up the thickness gradient.", .true.)
+  !                 endif
+  !                 if (((h(i,j,k) - 4.0*dt*G%IareaT(i,j)*uh_here(K)) - &
+  !                      (h(i,j+1,k) + 4.0*dt*G%IareaT(i,j+1)*uh_here(K))) * &
+  !                     (h(i,j,k) - h(i,j+1,k)) < 0.0) then
+  !                   call MOM_error(WARNING, &
+  !                          "Corrective v-transport is too large.", .true.)
+  !                 endif
+  !               endif
+  !             endif
+  !           endif ! u- or v- selection.
+  !          !  de_dx(I,K) = (e(i+1,j,K)-e(i,j,K)) * G%IdxCu(I,j)
+  !         endif
+  !       enddo
+  !     enddo
 
       if (n==1) then ! This is a u-column.
         do K=k_top+1,nz ; do i=ish,ie
@@ -2003,6 +2015,25 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
   call get_param(param_file, mdl, "KHTH", CS%Khth, &
                  "The background horizontal thickness diffusivity.", &
                  default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)
+  ! DB
+  ! add's parameters for KHTH_tensor
+  !!
+  call get_param(param_file, mdl, "USE_KHTH_TENSOR", CS%USE_KHTH_TENSOR, &
+                 "If true, 2X2 tensor is used for diffusing interface heights", &
+                 default=.false.)
+  call get_param(param_file, mdl, "KHTH_11", CS%Khth_11, &
+                 "The background horizontal thickness diffusivity - K_11.", &
+                 default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)
+  call get_param(param_file, mdl, "KHTH_12", CS%Khth_12, &
+                 "The background horizontal thickness diffusivity - K_12.", &
+                 default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)
+  call get_param(param_file, mdl, "KHTH_21", CS%Khth_21, &
+                 "The background horizontal thickness diffusivity - K_21.", &
+                 default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)
+  call get_param(param_file, mdl, "KHTH_22", CS%Khth_22, &
+                 "The background horizontal thickness diffusivity - K_22.", &
+                 default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)                 
+  !!                 
   call get_param(param_file, mdl, "READ_KHTH", CS%read_khth, &
                  "If true, read a file (given by KHTH_FILE) containing the "//&
                  "spatially varying horizontal isopycnal height diffusivity.", &
@@ -2271,7 +2302,7 @@ subroutine thickness_diffuse_get_KH(CS, KH_u_GME, KH_v_GME, G, GV)
 
 end subroutine thickness_diffuse_get_KH
 
-!> Deallocate the thickness_diffus3 control structure
+!> Deallocate the thickness_diffuse control structure
 subroutine thickness_diffuse_end(CS, CDp)
   type(thickness_diffuse_CS), intent(inout) :: CS !< Control structure for thickness_diffuse
   type(cont_diag_ptrs), intent(inout) :: CDp      !< Continuity diagnostic control structure
