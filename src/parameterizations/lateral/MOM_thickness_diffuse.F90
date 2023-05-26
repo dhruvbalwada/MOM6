@@ -322,13 +322,23 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
     endif
   endif
 
+  ! DB - Use tensor diff
+  if (CS%USE_KHTH_TENSOR) then 
+    !$OMP do
+    do k=1,nz ; do j=js,je ; do I=is-1,ie
+      KH_ux(I,j,k) = CS%KHTH_11
+      KH_uy(I,j,k) = CS%KHTH_12
+    enddo ; enddo ; enddo
+  endif
+
   if (CS%use_GME_thickness_diffuse) then
     !$OMP do
     do k=1,nz+1 ; do j=js,je ; do I=is-1,ie
       CS%KH_u_GME(I,j,k) = KH_u(I,j,k)
     enddo ; enddo ; enddo
   endif
-
+  
+  ! Set V diffusivities
   if (.not. CS%read_khth) then
    !$OMP do
     do J=js-1,je ; do i=is,ie
@@ -418,6 +428,15 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
     endif
   endif
 
+  ! DB - Use tensor diff (note that the CFL has not been checked on this.)
+  if (CS%USE_KHTH_TENSOR) then 
+    !$OMP do
+   do k=1,nz ; do j=js-1,je ; do I=is,ie
+     KH_vx(I,j,k) = CS%KHTH_21
+     KH_vy(I,j,k) = CS%KHTH_22
+   enddo ; enddo ; enddo
+ endif
+
   if (CS%use_GME_thickness_diffuse) then
     !$OMP do
     do k=1,nz+1 ; do J=js-1,je ; do i=is,ie
@@ -483,11 +502,27 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
 
   ! Calculate uhD, vhD from h, e, KH_u, KH_v, tv%T/S
   if (use_stored_slopes) then
-    call thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
-                                int_slope_u, int_slope_v, VarMix%slope_x, VarMix%slope_y)
+    if (.not. CS%USE_KHTH_TENSOR) then
+      ! Use stored slopes and scalar diff
+      call thickness_diffuse_full(h, e, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
+                                int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
+                                 Kh_u=Kh_u, Kh_v=Kh_v)
+    else 
+      ! Use stored slopes and tensor diff
+     call thickness_diffuse_full(h, e, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
+                                int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
+                                Kh_ux=Kh_ux, Kh_uy=Kh_uy, Kh_vx=Kh_vx, Kh_vy=Kh_vy)
+    endif
   else
-    call thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
-                                int_slope_u, int_slope_v)
+    if (.not. CS%USE_KHTH_TENSOR) then
+      ! Don't use stored slopes and use scalar diff
+      call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
+                                int_slope_u, int_slope_v, Kh_u= Kh_u, Kh_v=Kh_v)
+    else
+      ! Don't use stored slopes and use tensor diff
+      call thickness_diffuse_full(h, e, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
+                                int_slope_u, int_slope_v, Kh_ux= Kh_ux, Kh_uy= Kh_uy, Kh_vx= Kh_vx, Kh_vy= Kh_vy)
+    endif
   endif
 
   if (VarMix%use_variable_mixing) then
@@ -597,16 +632,17 @@ end subroutine thickness_diffuse
 !> Calculates parameterized layer transports for use in the continuity equation.
 !! Fluxes are limited to give positive definite thicknesses.
 !! Called by thickness_diffuse().
-subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, &
-                                  CS, int_slope_u, int_slope_v, slope_x, slope_y)
+subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, &
+                                  CS, int_slope_u, int_slope_v, Kh_u, Kh_v, slope_x, slope_y, &
+                                  Kh_ux, Kh_uy, Kh_vx, Kh_vy)
   type(ocean_grid_type),                        intent(in)  :: G     !< Ocean grid structure
   type(verticalGrid_type),                      intent(in)  :: GV    !< Vertical grid structure
   type(unit_scale_type),                        intent(in)  :: US    !< A dimensional unit scaling type
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),    intent(in)  :: h     !< Layer thickness [H ~> m or kg m-2]
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1),  intent(in)  :: e     !< Interface positions [Z ~> m]
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), intent(in)  :: Kh_u  !< Isopycnal height diffusivity
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), optional, intent(in)  :: Kh_u  !< Isopycnal height diffusivity
                                                                      !! at u points [L2 T-1 ~> m2 s-1]
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), intent(in)  :: Kh_v  !< Isopycnal height diffusivity
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), optional, intent(in)  :: Kh_v  !< Isopycnal height diffusivity
                                                                      !! at v points [L2 T-1 ~> m2 s-1]
   type(thermo_var_ptrs),                        intent(in)  :: tv    !< Thermodynamics structure
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),   intent(out) :: uhD   !< Zonal mass fluxes
@@ -627,6 +663,9 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
                                                                      !! density gradients [nondim].
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), optional, intent(in)  :: slope_x !< Isopyc. slope at u [Z L-1 ~> nondim]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), optional, intent(in)  :: slope_y !< Isopyc. slope at v [Z L-1 ~> nondim]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), optional, intent(in)  :: Kh_ux, Kh_uy !< Isopycnal height diffusivities 
+                                                                                      ! tensor row 1 terms
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), optional, intent(in)  :: Kh_vx, Kh_vy ! < row 2 terms 
 
   ! Local variables
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: &
@@ -716,7 +755,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
                         ! the units are different from other Sfn vars).
   real :: Sfn_safe      ! The streamfunction that goes linearly back to 0 at the surface.  This is a
                         ! good thing to use when the slope is so large as to be meaningless [Z L2 T-1 ~> m3 s-1].
-  real :: Slope         ! The slope of density surfaces, calculated in a way that is always
+  real :: Slope, SlopeX, SlopeY         ! The slope of density surfaces, calculated in a way that is always
                         ! between -1 and 1 after undoing dimensional scaling, [Z L-1 ~> nondim]
   real :: mag_grad2     ! The squared magnitude of the 3-d density gradient [R2 L-2 ~> kg2 m-8].
   real :: I_slope_max2  ! The inverse of slope_max squared [L2 Z-2 ~> nondim].
@@ -998,12 +1037,33 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
 
           else ! .not. use_EOS
             if (present_slope_x) then
-              Slope = slope_x(I,j,k)
+              if (.not. CS%USE_KHTH_TENSOR) then
+                Slope = slope_x(I,j,k)
+              else
+                SlopeX = slope_x(I,j,k)
+                SlopeY = 0.25*(slope_y(I,j,k) + slope_y(I,j-1,k) + &
+                          slope_y(I+1,j,k) + slope_y(I+1, j-1, k))
+              endif
             else
               Slope = ((e(i,j,K)-e(i+1,j,K))*G%IdxCu(I,j)) * G%OBCmaskCu(I,j)
+              ! more code needs to be added here
             endif
-            if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = Slope
-            Sfn_unlim_u(I,K) = ((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope)
+            
+            if (.not. CS%USE_KHTH_TENSOR) then
+              if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = Slope
+            else
+              if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = SlopeX
+              ! more code needs to be added here
+            endif
+
+            if (.not. CS%USE_KHTH_TENSOR) then
+              Sfn_unlim_u(I,K) = ((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope) ! there is double sign error here, which cancels out
+            else
+              Sfn_unlim_u(I,K) = ((KH_ux(I,j,K)*G%dy_Cu(I,j))*SlopeX + &
+                                  (KH_uy(I,j,K)*G%dy_Cu(I,j))*SlopeY)
+            endif
+
+
             hN2_u(I,K) = GV%g_prime(K)
           endif ! if (use_EOS)
         else ! if (k > nk_linear)
@@ -1279,12 +1339,31 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
 
           else ! .not. use_EOS
             if (present_slope_y) then
-              Slope = slope_y(i,J,k)
+              if (.not. CS%USE_KHTH_TENSOR) then
+                Slope = slope_y(i,J,k)
+              else
+                SlopeX = 0.25*(slope_x(i,J,k) + slope_x(i-1,J,k)+ &
+                               slope_x(i,J+1,k) + slope_x(i-1,J+1,k))
+                SlopeY = slope_y(I,j,k) 
+              endif
             else
               Slope = ((e(i,j,K)-e(i,j+1,K))*G%IdyCv(i,J)) * G%OBCmaskCv(i,J)
+              ! some mode code here
             endif
-            if (CS%id_slope_y > 0) CS%diagSlopeY(I,j,k) = Slope
-            Sfn_unlim_v(i,K) = ((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
+
+            if (.not. CS%USE_KHTH_TENSOR) then
+              if (CS%id_slope_y > 0) CS%diagSlopeY(I,j,k) = Slope
+            else
+              if (CS%id_slope_y > 0) CS%diagSlopeY(I,j,k) = SlopeY
+            endif
+
+            if (.not. CS%USE_KHTH_TENSOR) then
+              Sfn_unlim_v(i,K) = ((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
+            else
+              Sfn_unlim_v(i,K) = ((KH_vx(i,J,K)*G%dx_Cv(i,J))*SlopeX + &
+                                  (KH_vy(i,J,K)*G%dx_Cv(i,J))*SlopeY) 
+            endif
+            
             hN2_v(i,K) = GV%g_prime(K)
           endif ! if (use_EOS)
         else ! if (k > nk_linear)
