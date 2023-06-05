@@ -1037,6 +1037,7 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
 
           else ! .not. use_EOS
             if (present_slope_x) then
+              if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = slope_x(I,j,k)
               if (.not. CS%USE_KHTH_TENSOR) then
                 Slope = slope_x(I,j,k)
               else
@@ -1046,13 +1047,6 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
               endif
             else
               Slope = ((e(i,j,K)-e(i+1,j,K))*G%IdxCu(I,j)) * G%OBCmaskCu(I,j)
-              ! more code needs to be added here
-            endif
-            
-            if (.not. CS%USE_KHTH_TENSOR) then
-              if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = Slope
-            else
-              if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = SlopeX
               ! more code needs to be added here
             endif
 
@@ -1339,22 +1333,17 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
 
           else ! .not. use_EOS
             if (present_slope_y) then
+              if (CS%id_slope_y > 0) CS%diagSlopeY(i,J,k) = slope_y(i,J,k)
               if (.not. CS%USE_KHTH_TENSOR) then
                 Slope = slope_y(i,J,k)
               else
                 SlopeX = 0.25*(slope_x(i,J,k) + slope_x(i-1,J,k)+ &
                                slope_x(i,J+1,k) + slope_x(i-1,J+1,k))
-                SlopeY = slope_y(I,j,k) 
+                SlopeY = slope_y(i,J,k) 
               endif
             else
               Slope = ((e(i,j,K)-e(i,j+1,K))*G%IdyCv(i,J)) * G%OBCmaskCv(i,J)
               ! some mode code here
-            endif
-
-            if (.not. CS%USE_KHTH_TENSOR) then
-              if (CS%id_slope_y > 0) CS%diagSlopeY(I,j,k) = Slope
-            else
-              if (CS%id_slope_y > 0) CS%diagSlopeY(I,j,k) = SlopeY
             endif
 
             if (.not. CS%USE_KHTH_TENSOR) then
