@@ -94,7 +94,7 @@ use MOM_hor_index,             only : rotate_hor_index
 use MOM_interface_heights,     only : find_eta
 use MOM_interface_filter,      only : interface_filter, interface_filter_init, interface_filter_end
 use MOM_interface_filter,      only : interface_filter_CS
-use MOM_lateral_mixing_coeffs, only : calc_slope_functions, VarMix_init, VarMix_end
+use MOM_lateral_mixing_coeffs, only : calc_slope_functions, VarMix_init, VarMix_end, calc_NGM_diffusivity_tensor
 use MOM_lateral_mixing_coeffs, only : calc_resoln_function, calc_depth_function, VarMix_CS
 use MOM_MEKE,                  only : MEKE_alloc_register_restart, step_forward_MEKE
 use MOM_MEKE,                  only : MEKE_CS, MEKE_init, MEKE_end
@@ -1102,6 +1102,11 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
       call cpu_clock_begin(id_clock_thick_diff)
       if (CS%VarMix%use_variable_mixing) &
         call calc_slope_functions(h, CS%tv, dt, G, GV, US, CS%VarMix, OBC=CS%OBC)
+      ! DB Added
+      if (CS%VarMix%use_NGM) then 
+        call calc_NGM_diffusivity_tensor(u, v, G, GV, CS%VarMix)
+      endif
+      !
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt_thermo, G, GV, US, &
                              CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp)
       call cpu_clock_end(id_clock_thick_diff)
@@ -1235,6 +1240,11 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
       call cpu_clock_begin(id_clock_thick_diff)
       if (CS%VarMix%use_variable_mixing) &
         call calc_slope_functions(h, CS%tv, dt, G, GV, US, CS%VarMix, OBC=CS%OBC)
+      ! DB Added
+      if (CS%VarMix%use_NGM) then 
+        call calc_NGM_diffusivity_tensor(u, v, G, GV, CS%VarMix)
+      endif
+      ! 
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt, G, GV, US, &
                              CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp)
 

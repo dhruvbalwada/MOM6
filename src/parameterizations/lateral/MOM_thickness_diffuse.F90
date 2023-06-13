@@ -324,11 +324,19 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
 
   ! DB - Use tensor diff
   if (CS%USE_KHTH_TENSOR) then 
-    !$OMP do
-    do k=1,nz ; do j=js,je ; do I=is-1,ie
-      KH_ux(I,j,k) = CS%KHTH_11
-      KH_uy(I,j,k) = CS%KHTH_12
-    enddo ; enddo ; enddo
+    if (VarMix%use_NGM) then
+      !$OMP do
+      do k=1,nz ; do j=js,je ; do I=is-1,ie
+        KH_ux(I,j,k) = VarMix%KH_ux_NGM(I,j,k)
+        KH_uy(I,j,k) = VarMix%KH_uy_NGM(I,j,k)
+      enddo ; enddo ; enddo
+    else ! Read tensor KHTH from param file
+      !$OMP do
+      do k=1,nz ; do j=js,je ; do I=is-1,ie
+        KH_ux(I,j,k) = CS%KHTH_11
+        KH_uy(I,j,k) = CS%KHTH_12
+      enddo ; enddo ; enddo
+    endif
   endif
 
   if (CS%use_GME_thickness_diffuse) then
@@ -430,12 +438,20 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
 
   ! DB - Use tensor diff (note that the CFL has not been checked on this.)
   if (CS%USE_KHTH_TENSOR) then 
-    !$OMP do
-   do k=1,nz ; do j=js-1,je ; do I=is,ie
-     KH_vx(I,j,k) = CS%KHTH_21
-     KH_vy(I,j,k) = CS%KHTH_22
-   enddo ; enddo ; enddo
- endif
+    if (VarMix%use_NGM) then
+      !$OMP do
+      do k=1,nz ; do j=js-1,je ; do I=is,ie
+        KH_vx(I,j,k) = VarMix%KH_vx_NGM(I,j,k)
+        KH_vy(I,j,k) = VarMix%KH_vy_NGM(I,j,k)
+      enddo ; enddo ; enddo
+    else
+      !$OMP do
+      do k=1,nz ; do j=js-1,je ; do I=is,ie
+        KH_vx(I,j,k) = CS%KHTH_21
+        KH_vy(I,j,k) = CS%KHTH_22
+      enddo ; enddo ; enddo
+    endif
+  endif
 
   if (CS%use_GME_thickness_diffuse) then
     !$OMP do
@@ -1047,7 +1063,7 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
               endif
             else
               Slope = ((e(i,j,K)-e(i+1,j,K))*G%IdxCu(I,j)) * G%OBCmaskCu(I,j)
-              ! more code needs to be added here
+              ! more code needs to be added here (for case where slope is not stored)
             endif
 
             if (.not. CS%USE_KHTH_TENSOR) then

@@ -121,6 +121,14 @@ type, public :: VarMix_CS
   real ALLOCABLE_, dimension(NIMEM_,NJMEMB_PTR_,NKMEM_) :: &
     KH_v_QG               !< QG Leith GM coefficient at v-points [L2 T-1 ~> m2 s-1]
 
+  ! DB added
+  real ALLOCABLE_, dimension(NIMEMB_PTR_,NJMEM_,NKMEM_) :: &
+    KH_ux_NGM, KH_uy_NGM   !< NGM GM tensor coefficients at u-points [L2 T-1 ~> m2 s-1]
+
+  real ALLOCABLE_, dimension(NIMEM_,NJMEMB_PTR_,NKMEM_) :: &
+    KH_vx_NGM, KH_vy_NGM   !< NGM GM tensor coefficients at v-points [L2 T-1 ~> m2 s-1]
+  ! DB add end
+
   ! Parameters
   logical :: use_Visbeck  !< Use Visbeck formulation for thickness diffusivity
   integer :: VarMix_Ktop  !< Top layer to start downward integrals
@@ -148,6 +156,10 @@ type, public :: VarMix_CS
   logical :: use_QG_Leith_GM      !< If true, uses the QG Leith viscosity as the GM coefficient
   logical :: use_beta_in_QG_Leith !< If true, includes the beta term in the QG Leith GM coefficient
 
+  ! NGM parameters (!DB added)
+  logical :: use_NGM !<if true, uses the NGM for GM coefficients
+  real    :: NGM_const ! NGM non-dim constant
+
   ! Diagnostics
   !>@{
   !! Diagnostic identifier
@@ -165,7 +177,7 @@ type, public :: VarMix_CS
 end type VarMix_CS
 
 public VarMix_init, VarMix_end, calc_slope_functions, calc_resoln_function
-public calc_QG_Leith_viscosity, calc_depth_function
+public calc_QG_Leith_viscosity, calc_depth_function, calc_NGM_diffusivity_tensor
 
 contains
 
@@ -1085,6 +1097,60 @@ subroutine calc_QG_Leith_viscosity(CS, G, GV, US, h, k, div_xx_dx, div_xx_dy, vo
 
 end subroutine calc_QG_Leith_viscosity
 
+!> Calculates the Non-linear Gradient Model coefficients
+subroutine calc_NGM_diffusivity_tensor(u, v, G, GV, CS)
+  type(VarMix_CS),                           intent(inout) :: CS  !< Variable mixing coefficients 
+  type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
+  type(verticalGrid_type),                   intent(in)    :: GV  !< The ocean's vertical grid structure.
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(in)    :: u   !< The zonal velocity [L T-1 ~> m s-1].
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(in)    :: v   !< The meridional velocity [L T-1 ~> m s-1].
+  
+  ! Local variables
+  ! Center points 
+  real, dimension(SZI_(G),SZJ_(G)) :: &
+    dudx, dvdy   !
+  ! Corner points
+  real, dimension(SZIB_(G), SZJB_(G)) :: &
+    dudy, dvdx   
+  
+  integer :: is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
+  integer :: i, j, k, n
+  
+  ! Line 407 of MOM_hor_visc.F90
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+  Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
+  
+  do k=1, nz
+    ! Copy code from MOM_hor_visc.F90
+    ! Calculate velocity gradients at center points
+    do j=Jsq-1,Jeq+2 ; do i=Isq-1,Ieq+2
+      dudx(i,j) = G%IdxT(i,j)*(u(I,j,k) - u(I-1,j,k))
+      dvdy(i,j) = G%IdyT(i,j)*(v(i,J,k) - v(i,J-1,k))
+    enddo ; enddo
+
+    ! Calculate velocity gradients at corner points
+    do J=Jsq-2,Jeq+2 ; do I=Isq-2,Ieq+2
+      dvdx(I,J) = G%IdxBu(I,J)*(v(i+1,J,k) - v(i,J,k))
+      dudy(I,J) = G%IdyBu(I,J)*(u(I,j+1,k) - u(I,j,k))
+    enddo ; enddo
+    
+    ! Set diffusivity tensor elements
+    ! u components (on u point)
+    do j=js,je ; do I=is-1,ie
+      CS%KH_ux_NGM(I,j,k) = - CS%NGM_const*G%areaCu(i,j)*0.5*(dudx(i+1,j) + dudx(i,j))
+      CS%KH_uy_NGM(I,j,k) = - CS%NGM_const*G%areaCu(i,j)*0.5*(dudy(i,j) + dudy(i,j-1))
+    enddo; enddo 
+    
+    ! v components (on v point)
+    do j=js-1,je ; do I=is,ie
+      CS%KH_vx_NGM(i,J,k) = - CS%NGM_const*G%areaCv(i,j)*0.5*(dvdx(i,j) + dvdx(i-1,j))
+      CS%KH_vy_NGM(i,J,k) = - CS%NGM_const*G%areaCv(i,j)*0.5*(dvdy(i,j+1) + dvdy(i,j))
+    enddo; enddo 
+
+  enddo
+  
+end subroutine calc_NGM_diffusivity_tensor 
+
 !> Initializes the variables mixing coefficients container
 subroutine VarMix_init(Time, G, GV, US, param_file, diag, CS)
   type(time_type),            intent(in) :: Time !< Current model time
@@ -1538,6 +1604,21 @@ subroutine VarMix_init(Time, G, GV, US, param_file, diag, CS)
                          wave_speed_tol=wave_speed_tol)
   endif
 
+  ! NGM parameters
+  call get_param(param_file, mdl, "USE_NGM", CS%use_NGM, &
+                "If true, use the NGM for the GM coefficient.", &
+                default=.false.)
+  if (CS%use_NGM) then
+   call get_param(param_file, mdl, "C_NGM", CS%NGM_const, &
+                "The nondimensional NGM constant.", &
+                default=0.0, units="nondim")
+  
+    ALLOC_(CS%KH_ux_NGM(IsdB:IedB,jsd:jed,GV%ke)) ; CS%KH_ux_NGM(:,:,:) = 0.0
+    ALLOC_(CS%KH_uy_NGM(IsdB:IedB,jsd:jed,GV%ke)) ; CS%KH_uy_NGM(:,:,:) = 0.0
+    ALLOC_(CS%KH_vx_NGM(isd:ied,JsdB:JedB,GV%ke)) ; CS%KH_vx_NGM(:,:,:) = 0.0
+    ALLOC_(CS%KH_vy_NGM(isd:ied,JsdB:JedB,GV%ke)) ; CS%KH_vy_NGM(:,:,:) = 0.0
+  endif
+
   ! Leith parameters
   call get_param(param_file, mdl, "USE_QG_LEITH_GM", CS%use_QG_Leith_GM, &
                "If true, use the QG Leith viscosity as the GM coefficient.", &
@@ -1631,6 +1712,13 @@ subroutine VarMix_end(CS)
 
   if (CS%calculate_cg1) then
     deallocate(CS%cg1)
+  endif
+
+  if (CS%use_NGM) then
+    DEALLOC_(CS%KH_ux_NGM)
+    DEALLOC_(CS%KH_uy_NGM)
+    DEALLOC_(CS%KH_vx_NGM)
+    DEALLOC_(CS%KH_vy_NGM)
   endif
 
   if (CS%Use_QG_Leith_GM) then
