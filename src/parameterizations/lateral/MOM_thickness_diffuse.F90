@@ -323,16 +323,17 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   endif
 
   ! DB - Use tensor diff
+  ! Notice that all other places
   if (CS%USE_KHTH_TENSOR) then 
     if (VarMix%use_NGM) then
       !$OMP do
-      do k=1,nz ; do j=js,je ; do I=is-1,ie
-        KH_ux(I,j,k) = VarMix%KH_ux_NGM(I,j,k)
-        KH_uy(I,j,k) = VarMix%KH_uy_NGM(I,j,k)
+      do k=2,nz ; do j=js,je ; do I=is-1,ie
+        KH_ux(I,j,k) = VarMix%KH_ux_NGM(I,j,k-1)
+        KH_uy(I,j,k) = VarMix%KH_uy_NGM(I,j,k-1)
       enddo ; enddo ; enddo
     else ! Read tensor KHTH from param file
       !$OMP do
-      do k=1,nz ; do j=js,je ; do I=is-1,ie
+      do k=1,nz+1 ; do j=js,je ; do I=is-1,ie
         KH_ux(I,j,k) = CS%KHTH_11
         KH_uy(I,j,k) = CS%KHTH_12
       enddo ; enddo ; enddo
@@ -440,13 +441,13 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   if (CS%USE_KHTH_TENSOR) then 
     if (VarMix%use_NGM) then
       !$OMP do
-      do k=1,nz ; do j=js-1,je ; do I=is,ie
-        KH_vx(I,j,k) = VarMix%KH_vx_NGM(I,j,k)
-        KH_vy(I,j,k) = VarMix%KH_vy_NGM(I,j,k)
+      do k=2,nz ; do j=js-1,je ; do I=is,ie
+        KH_vx(I,j,k) = VarMix%KH_vx_NGM(I,j,k-1)
+        KH_vy(I,j,k) = VarMix%KH_vy_NGM(I,j,k-1)
       enddo ; enddo ; enddo
     else
       !$OMP do
-      do k=1,nz ; do j=js-1,je ; do I=is,ie
+      do k=1,nz+1 ; do j=js-1,je ; do I=is,ie
         KH_vx(I,j,k) = CS%KHTH_21
         KH_vy(I,j,k) = CS%KHTH_22
       enddo ; enddo ; enddo
@@ -1073,10 +1074,30 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
                                   (KH_uy(I,j,K)*G%dy_Cu(I,j))*SlopeY)
             endif
 
+            ! DB copied this code from EOS (why was this not part of this before?)
+            ! Avoid moving dense water upslope from below the level of
+            ! the bottom on the receiving side.
+            if (Sfn_unlim_u(I,K) > 0.0) then ! The flow below this interface is positive.
+              if (e(i,j,K) < e(i+1,j,nz+1)) then
+                Sfn_unlim_u(I,K) = 0.0 ! This is not uhtot, because it may compensate for
+                                ! deeper flow in very unusual cases.
+              elseif (e(i+1,j,nz+1) > e(i,j,K+1)) then
+                ! Scale the transport with the fraction of the donor layer above
+                ! the bottom on the receiving side.
+                Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * ((e(i,j,K) - e(i+1,j,nz+1)) / &
+                                         ((e(i,j,K) - e(i,j,K+1)) + dz_neglect))
+              endif
+            else
+              if (e(i+1,j,K) < e(i,j,nz+1)) then ; Sfn_unlim_u(I,K) = 0.0
+              elseif (e(i,j,nz+1) > e(i+1,j,K+1)) then
+                Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * ((e(i+1,j,K) - e(i,j,nz+1)) / &
+                                       ((e(i+1,j,K) - e(i+1,j,K+1)) + dz_neglect))
+              endif
+            endif
 
             hN2_u(I,K) = GV%g_prime(K)
           endif ! if (use_EOS)
-        else ! if (k > nk_linear)
+        else ! .not. (k > nk_linear) 
           hN2_u(I,K) = N2_floor * dz_neglect
           Sfn_unlim_u(I,K) = 0.
         endif ! if (k > nk_linear)
@@ -1367,6 +1388,26 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             else
               Sfn_unlim_v(i,K) = ((KH_vx(i,J,K)*G%dx_Cv(i,J))*SlopeX + &
                                   (KH_vy(i,J,K)*G%dx_Cv(i,J))*SlopeY) 
+            endif
+            
+            ! Avoid moving dense water upslope from below the level of
+            ! the bottom on the receiving side.
+            if (Sfn_unlim_v(i,K) > 0.0) then ! The flow below this interface is positive.
+              if (e(i,j,K) < e(i,j+1,nz+1)) then
+                Sfn_unlim_v(i,K) = 0.0 ! This is not vhtot, because it may compensate for
+                                ! deeper flow in very unusual cases.
+              elseif (e(i,j+1,nz+1) > e(i,j,K+1)) then
+                ! Scale the transport with the fraction of the donor layer above
+                ! the bottom on the receiving side.
+                Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) * ((e(i,j,K) - e(i,j+1,nz+1)) / &
+                                         ((e(i,j,K) - e(i,j,K+1)) + dz_neglect))
+              endif
+            else
+              if (e(i,j+1,K) < e(i,j,nz+1)) then ; Sfn_unlim_v(i,K) = 0.0
+              elseif (e(i,j,nz+1) > e(i,j+1,K+1)) then
+                Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) * ((e(i,j+1,K) - e(i,j,nz+1)) / &
+                                       ((e(i,j+1,K) - e(i,j+1,K+1)) + dz_neglect))
+              endif
             endif
             
             hN2_v(i,K) = GV%g_prime(K)
