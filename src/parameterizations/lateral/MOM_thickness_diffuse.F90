@@ -328,8 +328,14 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
     if (VarMix%use_NGM) then
       !$OMP do
       do k=2,nz ; do j=js,je ; do I=is-1,ie
-        KH_ux(I,j,k) = VarMix%KH_ux_NGM(I,j,k-1)
-        KH_uy(I,j,k) = VarMix%KH_uy_NGM(I,j,k-1)
+        KH_ux(I,j,k) = (VarMix%KH_ux_NGM(I,j,k-1) *0.5*(h(I,j,k-1) + h(I+1,j,k-1)) + &
+                        VarMix%KH_ux_NGM(I,j,k) *0.5*(h(I,j,k) + h(I+1,j,k)) ) / &
+                        (0.5*(h(I,j,k-1) + h(I+1,j,k-1)) + &
+                         0.5*(h(I,j,k) + h(I+1,j,k)) )
+        KH_uy(I,j,k) = (VarMix%KH_uy_NGM(I,j,k-1) *0.5*(h(I,j,k-1) + h(I+1,j,k-1)) + &
+                        VarMix%KH_uy_NGM(I,j,k) *0.5*(h(I,j,k) + h(I+1,j,k)) ) / &
+                        (0.5*(h(I,j,k-1) + h(I+1,j,k-1)) + &
+                        0.5*(h(I,j,k) + h(I+1,j,k)) )
       enddo ; enddo ; enddo
     else ! Read tensor KHTH from param file
       !$OMP do
@@ -442,8 +448,14 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
     if (VarMix%use_NGM) then
       !$OMP do
       do k=2,nz ; do j=js-1,je ; do I=is,ie
-        KH_vx(I,j,k) = VarMix%KH_vx_NGM(I,j,k-1)
-        KH_vy(I,j,k) = VarMix%KH_vy_NGM(I,j,k-1)
+        KH_vx(I,j,k) = ( VarMix%KH_vx_NGM(I,j,k-1) * 0.5*(h(I,j,k-1) + h(I,j+1,k-1)) + &
+                         VarMix%KH_vx_NGM(I,j,k) * 0.5*(h(I,j,k) + h(I,j+1,k)) ) / &
+                        (0.5*(h(I,j,k-1) + h(I,j+1,k-1)) + &
+                         0.5*(h(I,j,k) + h(I,j+1,k)) )
+        KH_vy(I,j,k) = ( VarMix%KH_vy_NGM(I,j,k-1) * 0.5*(h(I,j,k-1) + h(I,j+1,k-1)) + &
+                        VarMix%KH_vy_NGM(I,j,k) * 0.5*(h(I,j,k) + h(I,j+1,k)) ) / &
+                      (0.5*(h(I,j,k-1) + h(I,j+1,k-1)) + &
+                        0.5*(h(I,j,k) + h(I,j+1,k)) )
       enddo ; enddo ; enddo
     else
       !$OMP do
