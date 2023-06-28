@@ -1077,7 +1077,7 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
     h => NULL()    ! h : layer thickness [H ~> m or kg m-2]
 
   real :: temp_y(2)
-  real :: temp_x(2) = [1,2]
+  real :: temp_x(7) = [1,2,3,4,5,6,7]
 
   logical :: calc_dtbt  ! Indicates whether the dynamically adjusted
                         ! barotropic time step needs to be updated.
@@ -1259,7 +1259,7 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
       ! DB Added for ANN
       if (CS%use_ANN) then
         call ann(temp_x, temp_y, CS%ann_CSp)
-        write (*,*) "temp_y ->", temp_y
+        !write (*,*) "temp_y ->", temp_y
       endif
 
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt, G, GV, US, &
