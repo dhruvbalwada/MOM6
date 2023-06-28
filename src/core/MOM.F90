@@ -56,6 +56,7 @@ use MOM_ALE,                   only : ALE_updateVerticalGridType, ALE_remap_init
 use MOM_ALE,                   only : ALE_remap_tracers, ALE_remap_velocities
 use MOM_ALE,                   only : ALE_update_regrid_weights, pre_ALE_diagnostics, ALE_register_diags
 use MOM_ALE_sponge,            only : rotate_ALE_sponge, update_ALE_sponge_field
+use MOM_ann,                   only : ann_init, ann, ann_cs
 use MOM_barotropic,            only : Barotropic_CS
 use MOM_boundary_update,       only : call_OBC_register, OBC_register_end, update_OBC_CS
 use MOM_check_scaling,         only : check_MOM6_scaling_factors
@@ -287,6 +288,9 @@ type, public :: MOM_control_struct ; private
                                      !! after any calls to thickness_diffuse.
   logical :: thickness_diffuse       !< If true, diffuse interface height w/ a diffusivity KHTH.
   logical :: thickness_diffuse_first !< If true, diffuse thickness before dynamics.
+  ! DB ADDED
+  logical :: use_ann    !< if true, ANN is used. 
+  !
   logical :: mixedlayer_restrat      !< If true, use submesoscale mixed layer restratifying scheme.
   logical :: useMEKE                 !< If true, call the MEKE parameterization.
   logical :: use_stochastic_EOS      !< If true, use the stochastic EOS parameterizations.
@@ -380,6 +384,10 @@ type, public :: MOM_control_struct ; private
   type(thickness_diffuse_CS) :: thickness_diffuse_CSp
     !< Pointer to the control structure used for the isopycnal height diffusive transport.
     !! This is also common referred to as Gent-McWilliams diffusion
+  ! DB added
+  type(ANN_CS) :: ann_CSp
+    !< Pointer to the control structure used for the ANN.
+
   type(interface_filter_CS) :: interface_filter_CSp
     !< Control structure used for the interface height smoothing operator.
   type(mixedlayer_restrat_CS) :: mixedlayer_restrat_CSp
@@ -1068,6 +1076,9 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
     v => NULL(), & ! v : meridional velocity component [L T-1 ~> m s-1]
     h => NULL()    ! h : layer thickness [H ~> m or kg m-2]
 
+  real :: temp_y(2)
+  real :: temp_x(2) = [1,2]
+
   logical :: calc_dtbt  ! Indicates whether the dynamically adjusted
                         ! barotropic time step needs to be updated.
   logical :: showCallTree
@@ -1240,11 +1251,17 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
       call cpu_clock_begin(id_clock_thick_diff)
       if (CS%VarMix%use_variable_mixing) &
         call calc_slope_functions(h, CS%tv, dt, G, GV, US, CS%VarMix, OBC=CS%OBC)
-      ! DB Added
+      ! DB Added for NGM
       if (CS%VarMix%use_NGM) then 
         call calc_NGM_diffusivity_tensor(u, v, G, GV, CS%VarMix)
       endif
       ! 
+      ! DB Added for ANN
+      if (CS%use_ANN) then
+        call ann(temp_x, temp_y, CS%ann_CSp)
+        write (*,*) "temp_y ->", temp_y
+      endif
+
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt, G, GV, US, &
                              CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp)
 
@@ -2116,6 +2133,10 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   call get_param(param_file, "MOM", "THICKNESSDIFFUSE", CS%thickness_diffuse, &
                  "If true, isopycnal surfaces are diffused with a Laplacian "//&
                  "coefficient of KHTH.", default=.false.)
+  ! DB Added
+  !call get_param(param_file, "MOM", "ANN", CS%ann, &
+  !               "If true, an ANN may be used. ", default=.false.)
+  !
   call get_param(param_file, "MOM", "APPLY_INTERFACE_FILTER", CS%interface_filter, &
                  "If true, model interface heights are subjected to a grid-scale "//&
                  "dependent spatial smoothing, often with biharmonic filter.", default=.false.)
@@ -2977,6 +2998,10 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   call VarMix_init(Time, G, GV, US, param_file, diag, CS%VarMix)
   call set_visc_init(Time, G, GV, US, param_file, diag, CS%visc, CS%set_visc_CSp, restart_CSp, CS%OBC)
   call thickness_diffuse_init(Time, G, GV, US, param_file, diag, CS%CDp, CS%thickness_diffuse_CSp)
+
+  ! DB ADDED 
+  call ann_init(CS%ann_CSp, CS%use_ann, param_file)
+
   if (CS%interface_filter) &
     call interface_filter_init(Time, G, GV, US, param_file, diag, CS%CDp, CS%interface_filter_CSp)
 
