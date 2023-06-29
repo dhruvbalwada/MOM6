@@ -1076,8 +1076,6 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
     v => NULL(), & ! v : meridional velocity component [L T-1 ~> m s-1]
     h => NULL()    ! h : layer thickness [H ~> m or kg m-2]
 
-  real :: temp_y(2)
-  real :: temp_x(7) = [1,2,3,4,5,6,7]
 
   logical :: calc_dtbt  ! Indicates whether the dynamically adjusted
                         ! barotropic time step needs to be updated.
@@ -1257,10 +1255,10 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
       endif
       ! 
       ! DB Added for ANN
-      if (CS%use_ANN) then
-        call ann(temp_x, temp_y, CS%ann_CSp)
+      !if (CS%use_ANN) then
+      !  call ann(temp_x, temp_y, CS%ann_CSp)
         !write (*,*) "temp_y ->", temp_y
-      endif
+      !endif
 
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt, G, GV, US, &
                              CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp)
@@ -1942,6 +1940,8 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   type(ALE_sponge_CS), pointer :: ALE_sponge_in_CSp => NULL()
   type(oda_incupd_CS),pointer :: oda_incupd_in_CSp => NULL()
 
+  real :: temp_y(2)
+  real :: temp_x(2) = [6.,7.]
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
 
@@ -3001,6 +3001,11 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
 
   ! DB ADDED 
   call ann_init(CS%ann_CSp, CS%use_ann, param_file)
+  ! DB Added for ANN
+  if (CS%use_ANN) then
+    call ann(temp_x, temp_y, CS%ann_CSp)
+    write (*,*) "temp_x ->", temp_x, "temp_y ->", temp_y
+  endif
 
   if (CS%interface_filter) &
     call interface_filter_init(Time, G, GV, US, param_file, diag, CS%CDp, CS%interface_filter_CSp)

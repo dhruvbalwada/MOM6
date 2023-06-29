@@ -98,14 +98,14 @@ subroutine ann_init(CS, use_ANN, param_file)
         call MOM_read_data(CS%NNfile, matrix_name, CS%layers(i)%A, &
                             (/1,1,1,1/),(/CS%layers(i)%output_width,CS%layers(i)%input_width,1,1/))
 
-        !write (*,*) "Reading", matrix_name, CS%layers(i)%A
+        write (*,*) "Reading", matrix_name, CS%layers(i)%A
 
 
         allocate(CS%layers(i)%b(CS%layers(i)%output_width), source=0.)
         matrix_name = trim(b) // trim(layer_num_str)
         !write (*,*) "Reading", matrix_name
         call MOM_read_data(CS%NNfile, matrix_name, CS%layers(i)%b)
-        !write (*,*) "Reading", matrix_name, CS%layers(i)%b
+        write (*,*) "Reading", matrix_name, CS%layers(i)%b
     enddo
 
 end subroutine ann_init
@@ -134,8 +134,10 @@ subroutine ann(x, y, CS)
 
         ! Call the dense operations (matmul)
         call dense(CS%layers(i)%A, CS%layers(i)%b, x_1, x_2, CS%layer_sizes(i+1), CS%layer_sizes(i) )
+        write(*,*) "input", x_1, "output", x_2
 
-        ! Call the activation functions if needed
+        ! Call the activation functions (if needed)
+        call relu(x_2, CS%layer_sizes(i+1))
 
         ! swap allocations and move forward 
         deallocate(x_1)
@@ -157,19 +159,19 @@ subroutine dense(A, b, x, y, m, n)
     real, dimension(n), intent(in) :: x
     real, dimension(m), intent(out) :: y
     
-    real, dimension(n, m), intent(in) :: A
+    real, dimension(m, n), intent(in) :: A
     real, dimension(m), intent(in) :: b
 
     integer :: i, j
-    real :: temp_y
 
     ! Do a y = matmul(x, A)
-    ! Following the row-vector convention from JAX.
+    ! JAX follows row vector convention
+    ! in FORTRAN the matrices are transposed.
     do j=1,m ! ouput 
         y(j) = 0.
         do i=1,n ! input
             ! Multiply by kernel
-            y(j) = y(j) + x(i) * A(j, i)
+            y(j) = y(j) + ( x(i) * A(j, i) )
         enddo
         ! Add bias
         y(j) = y(j) + b(j)
@@ -179,15 +181,15 @@ subroutine dense(A, b, x, y, m, n)
 end subroutine dense
 
 ! A relu activation layer
-subroutine relu(x, y, m)
-    integer, intent(in) :: m ! size of input and output vectors
-    real, dimension(m), intent(in) ::x
-    real, dimension(m), intent(out) ::y
+subroutine relu(x, n)
+    integer, intent(in) :: n ! size of input and output vectors
+    real, dimension(n), intent(inout) :: x
+    !real, dimension(m), intent(out) ::y
 
     integer :: i 
 
-    do i=1,m
-        y(i) = max(x(i), 0.0)
+    do i=1,n
+        x(i) = max(x(i), 0.0)
     enddo
 
 end subroutine relu
