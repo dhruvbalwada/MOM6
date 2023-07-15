@@ -3002,10 +3002,10 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   ! DB ADDED 
   call ann_init(CS%ann_CSp, CS%use_ann, param_file)
   ! DB Added for ANN
-  if (CS%use_ANN) then
-    call ann(temp_x, temp_y, CS%ann_CSp)
-    write (*,*) "temp_x ->", temp_x, "temp_y ->", temp_y
-  endif
+  !if (CS%use_ANN) then
+  !  call ann(temp_x, temp_y, CS%ann_CSp)
+  !  write (*,*) "temp_x ->", temp_x, "temp_y ->", temp_y
+  !endif
 
   if (CS%interface_filter) &
     call interface_filter_init(Time, G, GV, US, param_file, diag, CS%CDp, CS%interface_filter_CSp)

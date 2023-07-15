@@ -1617,6 +1617,18 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
 
 end subroutine thickness_diffuse_full
 
+!> Calculates the additional streamfunction using the appropriate inputs
+!! Returns psi_ann, which is summed in thickness_diffuse_full with the psi = -KS
+!! Called by thickness diffuse()
+subroutine streamfn_ann()
+! Input/output variables 
+
+! local variables 
+
+  call ann(x,y, ...)
+
+end subroutine streamfn_ann
+
 !> Tridiagonal solver for streamfunction at interfaces
 subroutine streamfn_solver(nk, c2_h, hN2, sfn)
   integer,               intent(in)    :: nk   !< Number of layers
