@@ -21,6 +21,7 @@ use MOM_MEKE_types,            only : MEKE_type
 use MOM_unit_scaling,          only : unit_scale_type
 use MOM_variables,             only : thermo_var_ptrs, cont_diag_ptrs
 use MOM_verticalGrid,          only : verticalGrid_type
+use MOM_ann,                   only : ann, ann_cs
 implicit none ; private
 
 #include <MOM_memory.h>
@@ -51,6 +52,7 @@ type, public :: thickness_diffuse_CS ; private
   logical :: thickness_diffuse   !< If true, interfaces heights are diffused.
   !! DB 
   logical :: USE_KHTH_TENSOR     !< If true, interface heights are diffused using 2X2 tensor
+  logical :: USE_ANN             !< If true, thickness diffusion is done use a Stream function computed from ANN     
   !!
   logical :: use_FGNV_streamfn   !< If true, use the streamfunction formulation of
                                  !! Ferrari et al., 2010, which effectively emphasizes
@@ -108,6 +110,8 @@ type, public :: thickness_diffuse_CS ; private
   real, allocatable :: KH_v_GME(:,:,:)  !< Isopycnal height diffusivities in v-columns [L2 T-1 ~> m2 s-1]
   real, allocatable :: khth2d(:,:)      !< 2D isopycnal height diffusivity at h-points [L2 T-1 ~> m2 s-1]
 
+  real, allocatable :: Sfn_ann_x(:,:,:) ! Allocatable arrays to carry around ANN SF
+  real, allocatable :: Sfn_ann_y(:,:,:) ! 
   !>@{
   !! Diagnostic identifier
   integer :: id_uhGM    = -1, id_vhGM    = -1, id_GMwork = -1
@@ -123,7 +127,8 @@ contains
 !> Calculates isopycnal height diffusion coefficients and applies isopycnal height diffusion
 !! by modifying to the layer thicknesses, h. Diffusivities are limited to ensure stability.
 !! Also returns along-layer mass fluxes used in the continuity equation.
-subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp, CS)
+subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, &
+                             MEKE, VarMix, CDp, CS, ANN_CSp)
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
@@ -138,6 +143,10 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   type(VarMix_CS), target,                    intent(in)    :: VarMix !< Variable mixing coefficients
   type(cont_diag_ptrs),                       intent(inout) :: CDp    !< Diagnostics for the continuity equation
   type(thickness_diffuse_CS),                 intent(inout) :: CS     !< Control structure for thickness_diffuse
+  
+  type(ANN_CS),                     optional, intent(in)    :: ANN_CSp !< Control structure for ANN
+  
+
   ! Local variables
   real :: e(SZI_(G),SZJ_(G),SZK_(GV)+1) ! heights of interfaces, relative to mean
                                          ! sea level [Z ~> m], positive up.
@@ -536,7 +545,13 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
       call thickness_diffuse_full(h, e, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                 int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
                                  Kh_u=Kh_u, Kh_v=Kh_v)
-    else 
+    else if (CS%USE_ANN) then
+      ! Use stored slopes and ANN
+      call streamfn_ann(CS%Sfn_ann_x, CS%Sfn_ann_y, VarMix%slope_x, VarMix%slope_y, ANN_CSp, &
+                        G, GV)
+      call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
+                                  int_slope_u, int_slope_v, Sfn_ann_x=CS%Sfn_ann_x, Sfn_ann_y=CS%Sfn_ann_y)
+    else
       ! Use stored slopes and tensor diff
      call thickness_diffuse_full(h, e, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                 int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
@@ -663,7 +678,8 @@ end subroutine thickness_diffuse
 !! Called by thickness_diffuse().
 subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, &
                                   CS, int_slope_u, int_slope_v, Kh_u, Kh_v, slope_x, slope_y, &
-                                  Kh_ux, Kh_uy, Kh_vx, Kh_vy)
+                                  Kh_ux, Kh_uy, Kh_vx, Kh_vy, &
+                                  Sfn_ann_x, Sfn_ann_y)
   type(ocean_grid_type),                        intent(in)  :: G     !< Ocean grid structure
   type(verticalGrid_type),                      intent(in)  :: GV    !< Vertical grid structure
   type(unit_scale_type),                        intent(in)  :: US    !< A dimensional unit scaling type
@@ -694,8 +710,10 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), optional, intent(in)  :: slope_y !< Isopyc. slope at v [Z L-1 ~> nondim]
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), optional, intent(in)  :: Kh_ux, Kh_uy !< Isopycnal height diffusivities 
                                                                                       ! tensor row 1 terms
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), optional, intent(in)  :: Kh_vx, Kh_vy ! < row 2 terms 
-
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), optional, intent(in)  :: Kh_vx, Kh_vy ! < row 2 terms
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)+1), optional, intent(in) :: Sfn_ann_x ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)+1), optional, intent(in) :: Sfn_ann_y ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  
   ! Local variables
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: &
     T, &          ! The temperature [C ~> degC], with the values in
@@ -1081,7 +1099,9 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
 
             if (.not. CS%USE_KHTH_TENSOR) then
               Sfn_unlim_u(I,K) = ((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope) ! there is double sign error here, which cancels out
-            else
+            else if (CS%use_ANN) then 
+              Sfn_unlim_u(I,K) = Sfn_ann_x(I,j,K)
+            else 
               Sfn_unlim_u(I,K) = ((KH_ux(I,j,K)*G%dy_Cu(I,j))*SlopeX + &
                                   (KH_uy(I,j,K)*G%dy_Cu(I,j))*SlopeY)
             endif
@@ -1397,6 +1417,8 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
 
             if (.not. CS%USE_KHTH_TENSOR) then
               Sfn_unlim_v(i,K) = ((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
+            else if (CS%use_ANN) then
+              Sfn_unlim_v(i,K) = Sfn_ann_y(i,J,K)
             else
               Sfn_unlim_v(i,K) = ((KH_vx(i,J,K)*G%dx_Cv(i,J))*SlopeX + &
                                   (KH_vy(i,J,K)*G%dx_Cv(i,J))*SlopeY) 
@@ -1620,12 +1642,58 @@ end subroutine thickness_diffuse_full
 !> Calculates the additional streamfunction using the appropriate inputs
 !! Returns psi_ann, which is summed in thickness_diffuse_full with the psi = -KS
 !! Called by thickness diffuse()
-subroutine streamfn_ann()
-! Input/output variables 
+subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV)
+  type(ocean_grid_type),                        intent(in)  :: G     !< Ocean grid structure
+  type(verticalGrid_type),                      intent(in)  :: GV    !< Vertical grid structure
+  type(ann_cs),                                 intent(in)  :: ANN_CSp
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)+1), intent(out) :: Sfn_ann_x ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)+1), intent(out) :: Sfn_ann_y ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1),  intent(in)  :: slope_x !< Isopyc. slope at u [Z L-1 ~> nondim]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1),  intent(in)  :: slope_y !< Isopyc. slope at v [Z L-1 ~> nondim]
 
 ! local variables 
+  integer i, j, k, is, ie, js, je, nz
 
-  call ann(x,y, ...)
+  real, dimension(2) :: x, y
+
+  is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
+
+  ! these loops below are slightly adhoc. In principle we might
+  ! not be wanting to run twice. 
+  !  stream function on u points
+  do i = is-1, ie
+    do j = js, je
+      do k = 2, nz ! not setting values at the surface and bottom.
+        
+        x(1) = slope_x(i,j,k)
+        x(2) = 0. !slope_y(i,j,k)
+
+        call ann(x,y, ANN_CSp)
+        
+        Sfn_ann_x(i,j,k) = y(1)
+        !Sfn_ann_y(i,j,k) = y(2)
+
+      enddo
+    enddo
+  enddo
+
+  !  stream function on v points
+  do i = is, ie
+    do j = js-1, je
+      do k = 2, nz ! not setting values at the surface and bottom.
+        
+        x(1) = 0. !slope_x(i,j,k)
+        x(2) = slope_y(i,j,k)
+
+        call ann(x,y, ANN_CSp)
+        
+        !Sfn_ann_x(i,j,k) = y(1)
+        Sfn_ann_y(i,j,k) = y(2)
+
+      enddo
+    enddo
+  enddo
+
 
 end subroutine streamfn_ann
 
@@ -2362,6 +2430,11 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
     allocate(CS%KH_v_GME(G%isd:G%ied, G%JsdB:G%JedB, GV%ke+1), source=0.)
   endif
 
+  if (CS%use_ANN) then
+    allocate(CS%Sfn_ann_x(G%IsdB:G%IedB, G%jsd:G%jed, GV%ke+1), source=0.)
+    allocate(CS%Sfn_ann_y(G%isd:G%ied, G%JsdB:G%JedB, GV%ke+1), source=0.)
+  endif
+
   CS%id_uhGM = register_diag_field('ocean_model', 'uhGM', diag%axesCuL, Time, &
            'Time Mean Diffusive Zonal Thickness Flux', &
            'kg s-1', conversion=GV%H_to_kg_m2*US%L_to_m**2*US%s_to_T, &
@@ -2468,6 +2541,11 @@ subroutine thickness_diffuse_end(CS, CDp)
   if (CS%use_GME_thickness_diffuse) then
     deallocate(CS%KH_u_GME)
     deallocate(CS%KH_v_GME)
+  endif
+
+  if (CS%use_ANN) then
+    deallocate(CS%Sfn_ann_x)
+    deallocate(CS%Sfn_ann_y)
   endif
 
   if (allocated(CS%khth2d)) deallocate(CS%khth2d)
