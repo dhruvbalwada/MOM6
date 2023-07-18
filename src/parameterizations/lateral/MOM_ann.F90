@@ -127,17 +127,21 @@ subroutine ann(x, y, CS)
     ! start by allocating and assigning the input
     allocate(x_1(CS%layer_sizes(1)), source=0.)
     x_1 = x
+    !write(*,*) "input", x_1, "size", CS%layer_sizes(1)
 
     do i = 1, CS%num_layers -1 
         ! allocate and assign states
         allocate(x_2(CS%layer_sizes(i+1)), source=0.)
+        !write(*,*) "input", x_1, "output", x_2
 
         ! Call the dense operations (matmul)
         call dense(CS%layers(i)%A, CS%layers(i)%b, x_1, x_2, CS%layer_sizes(i+1), CS%layer_sizes(i) )
-        write(*,*) "input", x_1, "output", x_2
+        !write(*,*) "input", x_1, "output", x_2
 
         ! Call the activation functions (if needed)
-        call relu(x_2, CS%layer_sizes(i+1))
+        if (i < CS%num_layers-1) then
+            call relu(x_2, CS%layer_sizes(i+1))
+        endif
 
         ! swap allocations and move forward 
         deallocate(x_1)

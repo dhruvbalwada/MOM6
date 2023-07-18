@@ -540,32 +540,36 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, &
 
   ! Calculate uhD, vhD from h, e, KH_u, KH_v, tv%T/S
   if (use_stored_slopes) then
-    if (.not. CS%USE_KHTH_TENSOR) then
-      ! Use stored slopes and scalar diff
+    !write(*,*) CS%USE_ANN
+    if (CS%USE_KHTH_TENSOR) then
+      ! Use stored slopes and tensor diff
       call thickness_diffuse_full(h, e, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                 int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
-                                 Kh_u=Kh_u, Kh_v=Kh_v)
-    else if (CS%USE_ANN) then
+                                Kh_ux=Kh_ux, Kh_uy=Kh_uy, Kh_vx=Kh_vx, Kh_vy=Kh_vy)
+    elseif (CS%USE_ANN) then
+      !write(*,*) "Using ANN"
       ! Use stored slopes and ANN
       call streamfn_ann(CS%Sfn_ann_x, CS%Sfn_ann_y, VarMix%slope_x, VarMix%slope_y, ANN_CSp, &
                         G, GV)
       call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
-                                  int_slope_u, int_slope_v, Sfn_ann_x=CS%Sfn_ann_x, Sfn_ann_y=CS%Sfn_ann_y)
+                                  int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
+                                  Sfn_ann_x=CS%Sfn_ann_x, Sfn_ann_y=CS%Sfn_ann_y)
     else
-      ! Use stored slopes and tensor diff
-     call thickness_diffuse_full(h, e, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
+      !write(*,*) "Using GM"
+      ! Use stored slopes and scalar diff
+      call thickness_diffuse_full(h, e, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                 int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
-                                Kh_ux=Kh_ux, Kh_uy=Kh_uy, Kh_vx=Kh_vx, Kh_vy=Kh_vy)
+                                 Kh_u=Kh_u, Kh_v=Kh_v)
     endif
   else
-    if (.not. CS%USE_KHTH_TENSOR) then
-      ! Don't use stored slopes and use scalar diff
-      call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
-                                int_slope_u, int_slope_v, Kh_u= Kh_u, Kh_v=Kh_v)
-    else
+    if (CS%USE_KHTH_TENSOR) then
       ! Don't use stored slopes and use tensor diff
       call thickness_diffuse_full(h, e, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                 int_slope_u, int_slope_v, Kh_ux= Kh_ux, Kh_uy= Kh_uy, Kh_vx= Kh_vx, Kh_vy= Kh_vy)
+    else
+      ! Don't use stored slopes and use scalar diff
+      call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
+                                int_slope_u, int_slope_v, Kh_u= Kh_u, Kh_v=Kh_v)
     endif
   endif
 
@@ -1085,25 +1089,25 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
           else ! .not. use_EOS
             if (present_slope_x) then
               if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = slope_x(I,j,k)
-              if (.not. CS%USE_KHTH_TENSOR) then
-                Slope = slope_x(I,j,k)
-              else
+              if (CS%USE_KHTH_TENSOR) then
                 SlopeX = slope_x(I,j,k)
                 SlopeY = 0.25*(slope_y(I,j,k) + slope_y(I,j-1,k) + &
                           slope_y(I+1,j,k) + slope_y(I+1, j-1, k))
+              else
+                Slope = slope_x(I,j,k)
               endif
             else
               Slope = ((e(i,j,K)-e(i+1,j,K))*G%IdxCu(I,j)) * G%OBCmaskCu(I,j)
               ! more code needs to be added here (for case where slope is not stored)
             endif
 
-            if (.not. CS%USE_KHTH_TENSOR) then
-              Sfn_unlim_u(I,K) = ((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope) ! there is double sign error here, which cancels out
+            if (CS%USE_KHTH_TENSOR) then
+              Sfn_unlim_u(I,K) = ((KH_ux(I,j,K)*G%dy_Cu(I,j))*SlopeX + &
+                                  (KH_uy(I,j,K)*G%dy_Cu(I,j))*SlopeY)
             else if (CS%use_ANN) then 
               Sfn_unlim_u(I,K) = Sfn_ann_x(I,j,K)
             else 
-              Sfn_unlim_u(I,K) = ((KH_ux(I,j,K)*G%dy_Cu(I,j))*SlopeX + &
-                                  (KH_uy(I,j,K)*G%dy_Cu(I,j))*SlopeY)
+              Sfn_unlim_u(I,K) = ((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope) ! there is double sign error here, which cancels out
             endif
 
             ! DB copied this code from EOS (why was this not part of this before?)
@@ -1403,25 +1407,25 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
           else ! .not. use_EOS
             if (present_slope_y) then
               if (CS%id_slope_y > 0) CS%diagSlopeY(i,J,k) = slope_y(i,J,k)
-              if (.not. CS%USE_KHTH_TENSOR) then
-                Slope = slope_y(i,J,k)
-              else
+              if (CS%USE_KHTH_TENSOR) then
                 SlopeX = 0.25*(slope_x(i,J,k) + slope_x(i-1,J,k)+ &
                                slope_x(i,J+1,k) + slope_x(i-1,J+1,k))
-                SlopeY = slope_y(i,J,k) 
+                SlopeY = slope_y(i,J,k)
+              else
+                Slope = slope_y(i,J,k) 
               endif
             else
               Slope = ((e(i,j,K)-e(i,j+1,K))*G%IdyCv(i,J)) * G%OBCmaskCv(i,J)
               ! some mode code here
             endif
 
-            if (.not. CS%USE_KHTH_TENSOR) then
-              Sfn_unlim_v(i,K) = ((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
+            if (CS%USE_KHTH_TENSOR) then
+              Sfn_unlim_v(i,K) = ((KH_vx(i,J,K)*G%dx_Cv(i,J))*SlopeX + &
+                                  (KH_vy(i,J,K)*G%dx_Cv(i,J))*SlopeY) 
             else if (CS%use_ANN) then
               Sfn_unlim_v(i,K) = Sfn_ann_y(i,J,K)
             else
-              Sfn_unlim_v(i,K) = ((KH_vx(i,J,K)*G%dx_Cv(i,J))*SlopeX + &
-                                  (KH_vy(i,J,K)*G%dx_Cv(i,J))*SlopeY) 
+              Sfn_unlim_v(i,K) = ((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
             endif
             
             ! Avoid moving dense water upslope from below the level of
@@ -1661,6 +1665,13 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV)
   ! these loops below are slightly adhoc. In principle we might
   ! not be wanting to run twice. 
   !  stream function on u points
+  !write(*,*) "here"
+  x(1) = 21.
+  x(2) = 12. 
+  call ann(x, y, ANN_CSp)
+  !write(*,*) "x", x, "y", y
+
+ 
   do i = is-1, ie
     do j = js, je
       do k = 2, nz ! not setting values at the surface and bottom.
@@ -2192,7 +2203,7 @@ subroutine add_detangling_Kh(h, e, Kh_u, Kh_v, KH_u_CFL, KH_v_CFL, tv, dt, G, GV
 end subroutine add_detangling_Kh
 
 !> Initialize the isopycnal height diffusion module and its control structure
-subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
+subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, use_ann)
   type(time_type),         intent(in) :: Time    !< Current model time
   type(ocean_grid_type),   intent(in) :: G       !< Ocean grid structure
   type(verticalGrid_type), intent(in) :: GV      !< Vertical grid structure
@@ -2201,6 +2212,7 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
   type(diag_ctrl), target, intent(inout) :: diag !< Diagnostics control structure
   type(cont_diag_ptrs),    intent(inout) :: CDp  !< Continuity equation diagnostics
   type(thickness_diffuse_CS), intent(inout) :: CS !< Control structure for thickness_diffuse
+  logical                , intent(in) :: use_ann !< flag to tell if ANN needs to be on.
 
   ! Local variables
   character(len=40)  :: mdl = "MOM_thickness_diffuse" ! This module's name.
@@ -2233,7 +2245,11 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
                  "The background horizontal thickness diffusivity.", &
                  default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)
   ! DB
+  ! Get ANN param for turning on.
+  !call get_param(param_file, mdl, "USE_ANN", CS%use_ANN, &
+  !               "If true, turns on the ANN", default=.false.)
   ! add's parameters for KHTH_tensor
+  CS%use_ANN = use_ANN
   !!
   call get_param(param_file, mdl, "USE_KHTH_TENSOR", CS%USE_KHTH_TENSOR, &
                  "If true, 2X2 tensor is used for diffusing interface heights", &
