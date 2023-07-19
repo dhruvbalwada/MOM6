@@ -2,7 +2,7 @@
 *.swp
 *~
 html
-
+src.code-workspace
 
 # Autoconf output
 aclocal.m4
