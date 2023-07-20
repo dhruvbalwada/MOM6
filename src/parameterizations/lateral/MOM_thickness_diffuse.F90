@@ -103,6 +103,12 @@ type, public :: thickness_diffuse_CS ; private
   real, allocatable :: diagSlopeX(:,:,:)  !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
   real, allocatable :: diagSlopeY(:,:,:)  !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
 
+  ! Diagnosits to debug 
+  real, allocatable :: diagSlopeXu(:,:,:), diagSlopeXv(:,:,:) !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
+  real, allocatable :: diagSlopeYu(:,:,:), diagSlopeYv(:,:,:)  !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
+  real, allocatable :: Kh_eta_ux(:,:,:), Kh_eta_uy(:,:,:)
+  real, allocatable :: Kh_eta_vx(:,:,:), Kh_eta_vy(:,:,:)
+
   real, allocatable :: Kh_eta_u(:,:)    !< Isopycnal height diffusivities at u points [L2 T-1 ~> m2 s-1]
   real, allocatable :: Kh_eta_v(:,:)    !< Isopycnal height diffusivities in v points [L2 T-1 ~> m2 s-1]
 
@@ -118,6 +124,11 @@ type, public :: thickness_diffuse_CS ; private
   integer :: id_KH_u    = -1, id_KH_v    = -1, id_KH_t   = -1
   integer :: id_KH_u1   = -1, id_KH_v1   = -1, id_KH_t1  = -1
   integer :: id_slope_x = -1, id_slope_y = -1
+
+  ! Diagnostics to debug NGM model
+  integer :: id_Kux = -1, id_Kuy = -1, id_Kvx = -1, id_Kvy = -1
+  integer :: id_slope_xu = -1, id_slope_xv = -1, id_slope_yu = -1, id_slope_yv = -1
+
   integer :: id_sfn_unlim_x = -1, id_sfn_unlim_y = -1, id_sfn_x = -1, id_sfn_y = -1
   !>@}
 end type thickness_diffuse_CS
@@ -1090,9 +1101,13 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             if (present_slope_x) then
               if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = slope_x(I,j,k)
               if (CS%USE_KHTH_TENSOR) then
-                SlopeX = slope_x(I,j,k)
-                SlopeY = 0.25*(slope_y(I,j,k) + slope_y(I,j-1,k) + &
-                          slope_y(I+1,j,k) + slope_y(I+1, j-1, k))
+                SlopeX = slope_x(I,j,k) * G%mask2dCu(I,j)
+                SlopeY = 0.25*(slope_y(I,j,k) * G%mask2dCv(I,j) + slope_y(I,j-1,k) * G%mask2dCv(I,j-1) + &
+                          slope_y(I+1,j,k)* G%mask2dCv(I+1,j) + slope_y(I+1, j-1, k)* G%mask2dCv(I+1,j-1)) * G%mask2dCu(I,j)
+                if (CS%id_slope_xu > 0) CS%diagSlopeXu(I,j,k) = SlopeX
+                if (CS%id_slope_yu > 0) CS%diagSlopeYu(I,j,k) = SlopeY
+                if (CS%id_Kux > 0) CS%Kh_eta_ux(I,j,k) = KH_ux(I,j,k)          
+                if (CS%id_Kuy > 0) CS%Kh_eta_uy(I,j,k) = KH_uy(I,j,k)          
               else
                 Slope = slope_x(I,j,k)
               endif
@@ -1408,9 +1423,13 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             if (present_slope_y) then
               if (CS%id_slope_y > 0) CS%diagSlopeY(i,J,k) = slope_y(i,J,k)
               if (CS%USE_KHTH_TENSOR) then
-                SlopeX = 0.25*(slope_x(i,J,k) + slope_x(i-1,J,k)+ &
-                               slope_x(i,J+1,k) + slope_x(i-1,J+1,k))
-                SlopeY = slope_y(i,J,k)
+                SlopeX = 0.25*(slope_x(i,J,k) * G%mask2dCu(i,J) + slope_x(i-1,J,k) * G%mask2dCu(i-1,J) + &
+                               slope_x(i,J+1,k) * G%mask2dCu(i,J+1) + slope_x(i-1,J+1,k)* G%mask2dCu(i-1,J+1)) * G%mask2dCv(i,J)
+                SlopeY = slope_y(i,J,k) * G%mask2dCv(i,J)
+                if (CS%id_slope_xv > 0) CS%diagSlopeXv(I,j,k) = SlopeX
+                if (CS%id_slope_yv > 0) CS%diagSlopeYv(I,j,k) = SlopeY
+                if (CS%id_Kvx > 0) CS%Kh_eta_vx(I,j,k) = KH_vx(I,j,k)          
+                if (CS%id_Kvy > 0) CS%Kh_eta_vy(I,j,k) = KH_vy(I,j,k)   
               else
                 Slope = slope_y(i,J,k) 
               endif
@@ -1636,6 +1655,18 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
 
   if (CS%id_slope_x > 0) call post_data(CS%id_slope_x, CS%diagSlopeX, CS%diag)
   if (CS%id_slope_y > 0) call post_data(CS%id_slope_y, CS%diagSlopeY, CS%diag)
+
+  ! Added to debug NGM
+  if (CS%id_slope_xu > 0) call post_data(CS%id_slope_xu, CS%diagSlopeXu, CS%diag)
+  if (CS%id_slope_xv > 0) call post_data(CS%id_slope_xv, CS%diagSlopeXv, CS%diag)
+  if (CS%id_slope_yu > 0) call post_data(CS%id_slope_yu, CS%diagSlopeYu, CS%diag)
+  if (CS%id_slope_yv > 0) call post_data(CS%id_slope_yv, CS%diagSlopeYv, CS%diag)
+  if (CS%id_Kux > 0) call post_data(CS%id_Kux, CS%Kh_eta_ux, CS%diag)
+  if (CS%id_Kuy > 0) call post_data(CS%id_Kuy, CS%Kh_eta_uy, CS%diag)
+  if (CS%id_Kvx > 0) call post_data(CS%id_Kvx, CS%Kh_eta_vx, CS%diag)
+  if (CS%id_Kvy > 0) call post_data(CS%id_Kvy, CS%Kh_eta_vy, CS%diag)
+
+
   if (CS%id_sfn_x > 0) call post_data(CS%id_sfn_x, diag_sfn_x, CS%diag)
   if (CS%id_sfn_y > 0) call post_data(CS%id_sfn_y, diag_sfn_y, CS%diag)
   if (CS%id_sfn_unlim_x > 0) call post_data(CS%id_sfn_unlim_x, diag_sfn_unlim_x, CS%diag)
@@ -2503,6 +2534,49 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   if (CS%id_slope_y > 0) &
     allocate(CS%diagSlopeY(G%isd:G%ied,G%JsdB:G%JedB,GV%ke+1), source=0.)
 
+! To debug NGM
+  CS%id_slope_xu =  register_diag_field('ocean_model', 'neutral_slope_xu', diag%axesCui, Time, &
+           'Zonal slope of neutral surface at u point', 'nondim', conversion=US%Z_to_L)
+  if (CS%id_slope_xu > 0) &
+    allocate(CS%diagSlopeXu(G%IsdB:G%IedB,G%jsd:G%jed,GV%ke+1), source=0.)
+  CS%id_slope_yu =  register_diag_field('ocean_model', 'neutral_slope_yu', diag%axesCui, Time, &
+           'Meridional slope of neutral surface at u point', 'nondim', conversion=US%Z_to_L)
+  if (CS%id_slope_yu > 0) &
+    allocate(CS%diagSlopeYu(G%IsdB:G%IedB,G%jsd:G%jed,GV%ke+1), source=0.)
+  CS%id_slope_xv =  register_diag_field('ocean_model', 'neutral_slope_xv', diag%axesCvi, Time, &
+           'Zonal slope of neutral surface at v point', 'nondim', conversion=US%Z_to_L)
+  if (CS%id_slope_xv > 0) &
+    allocate(CS%diagSlopeXv(G%isd:G%ied,G%JsdB:G%JedB,GV%ke+1), source=0.)
+  CS%id_slope_yv =  register_diag_field('ocean_model', 'neutral_slope_yv', diag%axesCvi, Time, &
+           'Meridional slope of neutral surface at v point', 'nondim', conversion=US%Z_to_L)
+  if (CS%id_slope_yv > 0) &
+    allocate(CS%diagSlopeYv(G%isd:G%ied,G%JsdB:G%JedB,GV%ke+1), source=0.)
+
+  CS%id_Kux =  register_diag_field('ocean_model', 'KHTH_ux', diag%axesCui, Time, &
+           'Parameterized mesoscale eddy advection NGM diffusivity at U-point in x-direction', &
+           'm2 s-1', conversion=US%L_to_m**2*US%s_to_T)
+  if (CS%id_Kux > 0) &
+    allocate(CS%Kh_eta_ux(G%IsdB:G%IedB,G%jsd:G%jed,GV%ke+1), source=0.)
+
+  CS%id_Kuy =  register_diag_field('ocean_model', 'KHTH_uy', diag%axesCui, Time, &
+           'Parameterized mesoscale eddy advection NGM diffusivity at U-point in y-direction', &
+           'm2 s-1', conversion=US%L_to_m**2*US%s_to_T)
+  if (CS%id_Kuy > 0) &
+    allocate(CS%Kh_eta_uy(G%IsdB:G%IedB,G%jsd:G%jed,GV%ke+1), source=0.)
+
+  CS%id_Kvx =  register_diag_field('ocean_model', 'KHTH_vx', diag%axesCvi, Time, &
+           'Parameterized mesoscale eddy advection NGM diffusivity at V-point in x-direction', &
+           'm2 s-1', conversion=US%L_to_m**2*US%s_to_T)
+  if (CS%id_Kvx > 0) &
+    allocate(CS%Kh_eta_vx(G%isd:G%ied,G%JsdB:G%JedB,GV%ke+1), source=0.)
+  
+  CS%id_Kvy =  register_diag_field('ocean_model', 'KHTH_vy', diag%axesCvi, Time, &
+           'Parameterized mesoscale eddy advection NGM diffusivity at V-point in y-direction', &
+           'm2 s-1', conversion=US%L_to_m**2*US%s_to_T)
+  if (CS%id_Kvy > 0) &
+    allocate(CS%Kh_eta_vy(G%isd:G%ied,G%JsdB:G%JedB,GV%ke+1), source=0.)
+
+
   CS%id_sfn_x =  register_diag_field('ocean_model', 'GM_sfn_x', diag%axesCui, Time, &
            'Parameterized Zonal Overturning Streamfunction', &
            'm3 s-1', conversion=GV%H_to_m*US%L_to_m**2*US%s_to_T)
@@ -2547,6 +2621,18 @@ subroutine thickness_diffuse_end(CS, CDp)
 
   if (CS%id_slope_x > 0) deallocate(CS%diagSlopeX)
   if (CS%id_slope_y > 0) deallocate(CS%diagSlopeY)
+
+  ! For NGM debugging
+  if (CS%id_slope_xu > 0) deallocate(CS%diagSlopeXu)
+  if (CS%id_slope_xv > 0) deallocate(CS%diagSlopeXv)
+  if (CS%id_slope_yu > 0) deallocate(CS%diagSlopeYu)
+  if (CS%id_slope_yv > 0) deallocate(CS%diagSlopeYv)
+
+  if (CS%id_Kux > 0) deallocate(CS%Kh_eta_ux)
+  if (CS%id_Kuy > 0) deallocate(CS%Kh_eta_uy)
+  if (CS%id_Kvx > 0) deallocate(CS%Kh_eta_vx)
+  if (CS%id_Kvy > 0) deallocate(CS%Kh_eta_vy)
+
 
   if (CS%id_GMwork > 0) deallocate(CS%GMwork)
 

@@ -1124,14 +1124,14 @@ subroutine calc_NGM_diffusivity_tensor(u, v, G, GV, CS)
     ! Copy code from MOM_hor_visc.F90
     ! Calculate velocity gradients at center points
     do j=Jsq-1,Jeq+2 ; do i=Isq-1,Ieq+2
-      dudx(i,j) = G%IdxT(i,j)*(u(I,j,k) - u(I-1,j,k))
-      dvdy(i,j) = G%IdyT(i,j)*(v(i,J,k) - v(i,J-1,k))
+      dudx(i,j) = G%IdxT(i,j)*(u(I,j,k) - u(I-1,j,k)) * G%mask2dT(I,j)
+      dvdy(i,j) = G%IdyT(i,j)*(v(i,J,k) - v(i,J-1,k)) * G%mask2dT(I,j)
     enddo ; enddo
 
     ! Calculate velocity gradients at corner points
     do J=Jsq-2,Jeq+2 ; do I=Isq-2,Ieq+2
-      dvdx(I,J) = G%IdxBu(I,J)*(v(i+1,J,k) - v(i,J,k))
-      dudy(I,J) = G%IdyBu(I,J)*(u(I,j+1,k) - u(I,j,k))
+      dvdx(I,J) = G%IdxBu(I,J)*(v(i+1,J,k) - v(i,J,k)) * G%mask2dBu(I,j)
+      dudy(I,J) = G%IdyBu(I,J)*(u(I,j+1,k) - u(I,j,k)) * G%mask2dBu(I,j)
     enddo ; enddo
     
     ! Set diffusivity tensor elements
