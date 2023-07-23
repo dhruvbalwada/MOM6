@@ -130,6 +130,9 @@ type, public :: thickness_diffuse_CS ; private
   integer :: id_slope_xu = -1, id_slope_xv = -1, id_slope_yu = -1, id_slope_yv = -1
 
   integer :: id_sfn_unlim_x = -1, id_sfn_unlim_y = -1, id_sfn_x = -1, id_sfn_y = -1
+
+  integer :: id_hu_mask = -1, id_hv_mask = -1
+
   !>@}
 end type thickness_diffuse_CS
 
@@ -848,6 +851,8 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
                                                         ! [H L2 T-1 ~> m3 s-1 or kg s-1]
   real :: diag_sfn_unlim_y(SZI_(G),SZJB_(G),SZK_(GV)+1) ! Diagnostic of the y-face streamfunction before
                                                         ! applying limiters [H L2 T-1 ~> m3 s-1 or kg s-1]
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)) :: hu_mask  
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)) :: hv_mask
   logical :: present_slope_x, present_slope_y, calc_derivatives
   integer, dimension(2) :: EOSdom_u  ! The shifted I-computational domain to use for equation of
                                      ! state calculations at u-points.
@@ -881,6 +886,14 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
   Slope_y_PE(:,:,:) = 0.0
   hN2_x_PE(:,:,:) = 0.0
   hN2_y_PE(:,:,:) = 0.0
+
+  !write(*,*) "here in thickness_full"
+  hu_mask(:,:,:) = 1.
+  hv_mask(:,:,:) = 1.
+  call thickness_mask_3D(h, hu_mask, hv_mask, G, GV, CS)
+  if (CS%id_hu_mask > 0) call post_data(CS%id_hu_mask, hu_mask, CS%diag)
+  if (CS%id_hv_mask > 0) call post_data(CS%id_hv_mask, hv_mask, CS%diag)
+
 
   find_work = allocated(MEKE%GM_src)
   find_work = (allocated(CS%GMwork) .or. find_work)
@@ -1101,9 +1114,15 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             if (present_slope_x) then
               if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = slope_x(I,j,k)
               if (CS%USE_KHTH_TENSOR) then
-                SlopeX = slope_x(I,j,k) * G%mask2dCu(I,j)
-                SlopeY = 0.25*(slope_y(I,j,k) * G%mask2dCv(I,j) + slope_y(I,j-1,k) * G%mask2dCv(I,j-1) + &
-                          slope_y(I+1,j,k)* G%mask2dCv(I+1,j) + slope_y(I+1, j-1, k)* G%mask2dCv(I+1,j-1)) * G%mask2dCu(I,j)
+                !hu_mask = 0.; if ( min(h(i,j,k), h(i+1,j,k)) > 0.01) hu_mask = 1.0
+                SlopeX = slope_x(I,j,k) * G%mask2dCu(I,j) * hu_mask(i,j,k)
+                SlopeY = 0.25*(slope_y(I,j,k) * G%mask2dCv(I,j) * hv_mask(i,j,k) + &
+                               slope_y(I,j-1,k) * G%mask2dCv(I,j-1) * hv_mask(i,j-1,k) + &
+                               slope_y(I+1,j,k)* G%mask2dCv(I+1,j) * hv_mask(i+1,j,k) + &
+                               slope_y(I+1, j-1, k)* G%mask2dCv(I+1,j-1) * hv_mask(i+1,j-1,k) ) *  &
+                                   G%mask2dCu(I,j) * hu_mask(i,j,k)
+
+
                 if (CS%id_slope_xu > 0) CS%diagSlopeXu(I,j,k) = SlopeX
                 if (CS%id_slope_yu > 0) CS%diagSlopeYu(I,j,k) = SlopeY
                 if (CS%id_Kux > 0) CS%Kh_eta_ux(I,j,k) = KH_ux(I,j,k)          
@@ -1423,9 +1442,13 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             if (present_slope_y) then
               if (CS%id_slope_y > 0) CS%diagSlopeY(i,J,k) = slope_y(i,J,k)
               if (CS%USE_KHTH_TENSOR) then
-                SlopeX = 0.25*(slope_x(i,J,k) * G%mask2dCu(i,J) + slope_x(i-1,J,k) * G%mask2dCu(i-1,J) + &
-                               slope_x(i,J+1,k) * G%mask2dCu(i,J+1) + slope_x(i-1,J+1,k)* G%mask2dCu(i-1,J+1)) * G%mask2dCv(i,J)
-                SlopeY = slope_y(i,J,k) * G%mask2dCv(i,J)
+                !hv_mask = 0.; if ( min(h(i,j,k), h(i,j+1,k)) > 0.01) hv_mask = 1.0
+                SlopeX = 0.25*(slope_x(i,J,k) * G%mask2dCu(i,J) *hu_mask(i,j,k) + &
+                               slope_x(i-1,J,k) * G%mask2dCu(i-1,J) *hu_mask(i-1,j,k) + &
+                               slope_x(i,J+1,k) * G%mask2dCu(i,J+1) *hu_mask(i,j+1,k)+ &
+                               slope_x(i-1,J+1,k)* G%mask2dCu(i-1,J+1) *hu_mask(i-1,j+1,k) ) * &
+                               G%mask2dCv(i,J) * hv_mask(i,j,k)
+                SlopeY = slope_y(i,J,k) * G%mask2dCv(i,J) * hv_mask(i,j,k)
                 if (CS%id_slope_xv > 0) CS%diagSlopeXv(I,j,k) = SlopeX
                 if (CS%id_slope_yv > 0) CS%diagSlopeYv(I,j,k) = SlopeY
                 if (CS%id_Kvx > 0) CS%Kh_eta_vx(I,j,k) = KH_vx(I,j,k)          
@@ -1673,6 +1696,44 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
   if (CS%id_sfn_unlim_y > 0) call post_data(CS%id_sfn_unlim_y, diag_sfn_unlim_y, CS%diag)
 
 end subroutine thickness_diffuse_full
+
+
+!! Called to compute thickness based masks 
+subroutine thickness_mask_3D(h, hu_mask, hv_mask, G, GV, CS)
+  type(ocean_grid_type),                        intent(in)  :: G     !< Ocean grid structure
+  type(verticalGrid_type),                      intent(in)  :: GV    !< Vertical grid structure
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),    intent(in)  :: h     !< Layer thickness [H ~> m or kg m-2]
+
+  type(thickness_diffuse_CS),                 intent(inout) :: CS     !< Control structure for thickness_diffuse
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)), intent(out) :: hu_mask ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)), intent(out) :: hv_mask ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  
+  integer :: is, ie, js, je, nz
+  integer :: i, j, k
+  is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke ;
+
+  do k = 1, nz
+    do j = js, je 
+      do i = is-1, ie
+        hu_mask(i,j,k) = 0.
+        if ( min(h(i,j,k), h(i+1,j,k)) > .01) hu_mask(i,j,k) = 1.0
+      enddo
+    enddo
+  enddo
+
+  do k = 1, nz
+    do j = js-1, je 
+      do i = is, ie
+        hv_mask(i,j,k) = 0.
+        if ( min(h(i,j,k), h(i,j+1,k)) > .01) hv_mask(i,j,k) = 1.0
+      enddo
+    enddo
+  enddo
+
+  !if (CS%id_hu_mask > 0) call post_data(CS%id_hu_mask, hu_mask, CS%diag)
+  !if (CS%id_hv_mask > 0) call post_data(CS%id_hv_mask, hv_mask, CS%diag)
+
+end subroutine thickness_mask_3D
 
 !> Calculates the additional streamfunction using the appropriate inputs
 !! Returns psi_ann, which is summed in thickness_diffuse_full with the psi = -KS
@@ -2576,6 +2637,13 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   if (CS%id_Kvy > 0) &
     allocate(CS%Kh_eta_vy(G%isd:G%ied,G%JsdB:G%JedB,GV%ke+1), source=0.)
 
+  !write(*,*) "here in init"
+  CS%id_hu_mask = register_diag_field('ocean_model', 'hu_mask', diag%axesCuL, Time, &
+           '0 if close by h is small', &
+           'nondim', conversion=1.)
+  CS%id_hv_mask = register_diag_field('ocean_model', 'hv_mask', diag%axesCvL, Time, &
+           '0 if close by h is small', &
+           'nondim', conversion=1.)
 
   CS%id_sfn_x =  register_diag_field('ocean_model', 'GM_sfn_x', diag%axesCui, Time, &
            'Parameterized Zonal Overturning Streamfunction', &
@@ -2590,6 +2658,7 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
            'Parameterized Meridional Overturning Streamfunction before limiting/smoothing', &
            'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
 
+!write(*,*) "here in init end"
 end subroutine thickness_diffuse_init
 
 !> Copies KH_u_GME and KH_v_GME from private type into arrays provided as arguments

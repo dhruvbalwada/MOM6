@@ -9,6 +9,7 @@ use MOM_diag_mediator,     only : register_diag_field, safe_alloc_ptr, post_data
 use MOM_diag_mediator,     only : diag_ctrl, time_type, query_averaging_enabled
 use MOM_domains,           only : create_group_pass, do_group_pass
 use MOM_domains,           only : group_pass_type, pass_var, pass_vector
+use MOM_domains,           only : NORTH_FACE, EAST_FACE
 use MOM_file_parser,       only : get_param, log_version, param_file_type
 use MOM_interface_heights, only : find_eta
 use MOM_isopycnal_slopes,  only : calc_isoneutral_slopes
@@ -159,6 +160,8 @@ type, public :: VarMix_CS
   ! NGM parameters (!DB added)
   logical :: use_NGM !<if true, uses the NGM for GM coefficients
   real    :: NGM_const ! NGM non-dim constant
+  logical :: use_NGM_K_LIM !< if true, limit the K coeff
+  real    :: NGM_K_LIM  !< absolute value to limit K by.
 
   ! Diagnostics
   !>@{
@@ -1098,13 +1101,16 @@ subroutine calc_QG_Leith_viscosity(CS, G, GV, US, h, k, div_xx_dx, div_xx_dy, vo
 end subroutine calc_QG_Leith_viscosity
 
 !> Calculates the Non-linear Gradient Model coefficients
-subroutine calc_NGM_diffusivity_tensor(u, v, G, GV, CS)
+subroutine calc_NGM_diffusivity_tensor(u, v, h, G, GV, CS)
   type(VarMix_CS),                           intent(inout) :: CS  !< Variable mixing coefficients 
   type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
   type(verticalGrid_type),                   intent(in)    :: GV  !< The ocean's vertical grid structure.
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(in)    :: u   !< The zonal velocity [L T-1 ~> m s-1].
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(in)    :: v   !< The meridional velocity [L T-1 ~> m s-1].
-  
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),   intent(in)  :: h     !< Layer thickness [H ~> m or kg m-2]
+
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)) :: hu_mask ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)) :: hv_mask ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
   ! Local variables
   ! Center points 
   real, dimension(SZI_(G),SZJ_(G)) :: &
@@ -1120,31 +1126,63 @@ subroutine calc_NGM_diffusivity_tensor(u, v, G, GV, CS)
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
   
+  do k = 1, nz
+    do j = js, je 
+      do i = is-1, ie
+        hu_mask(i,j,k) = 0.
+        if ( min(h(i,j,k), h(i+1,j,k)) > .01) hu_mask(i,j,k) = 1.0
+      enddo
+    enddo
+  enddo
+  call pass_var(hu_mask, G%Domain, position=EAST_FACE, complete=.true.)
+
+  do k = 1, nz
+    do j = js-1, je 
+      do i = is, ie
+        hv_mask(i,j,k) = 0.
+        if ( min(h(i,j,k), h(i,j+1,k)) > .01) hv_mask(i,j,k) = 1.0
+      enddo
+    enddo
+  enddo
+  call pass_var(hv_mask, G%Domain, position=NORTH_FACE, complete=.true.)
+
   do k=1, nz
     ! Copy code from MOM_hor_visc.F90
     ! Calculate velocity gradients at center points
     do j=Jsq-1,Jeq+2 ; do i=Isq-1,Ieq+2
-      dudx(i,j) = G%IdxT(i,j)*(u(I,j,k) - u(I-1,j,k)) * G%mask2dT(I,j)
-      dvdy(i,j) = G%IdyT(i,j)*(v(i,J,k) - v(i,J-1,k)) * G%mask2dT(I,j)
+      dudx(i,j) = G%IdxT(i,j)*(u(I,j,k) * hu_mask(i,j,k) - u(I-1,j,k) * hu_mask(i-1,j,k) ) * G%mask2dT(I,j)
+      dvdy(i,j) = G%IdyT(i,j)*(v(i,J,k) * hv_mask(i,j,k) - v(i,J-1,k) * hv_mask(i-1,j,k) ) * G%mask2dT(I,j)
     enddo ; enddo
 
     ! Calculate velocity gradients at corner points
     do J=Jsq-2,Jeq+2 ; do I=Isq-2,Ieq+2
-      dvdx(I,J) = G%IdxBu(I,J)*(v(i+1,J,k) - v(i,J,k)) * G%mask2dBu(I,j)
-      dudy(I,J) = G%IdyBu(I,J)*(u(I,j+1,k) - u(I,j,k)) * G%mask2dBu(I,j)
+      dvdx(I,J) = G%IdxBu(I,J)*(v(i+1,J,k) * hv_mask(i+1,j,k) - v(i,J,k) * hv_mask(i,j,k)) * G%mask2dBu(I,j)
+      dudy(I,J) = G%IdyBu(I,J)*(u(I,j+1,k) * hu_mask(i,j+1,k) - u(I,j,k) * hu_mask(i,j,k)) * G%mask2dBu(I,j)
     enddo ; enddo
     
     ! Set diffusivity tensor elements
     ! u components (on u point)
     do j=js,je ; do I=is-1,ie
       CS%KH_ux_NGM(I,j,k) = - CS%NGM_const*G%areaCu(i,j)*0.5*(dudx(i+1,j) + dudx(i,j))
-      CS%KH_uy_NGM(I,j,k) = - CS%NGM_const*G%areaCu(i,j)*0.5*(dudy(i,j) + dudy(i,j-1))
+      CS%KH_uy_NGM(I,j,k) = - CS%NGM_const*G%areaCu(i,j)*0.5*(dudy(i,j) + dudy(i,j-1)) * hu_mask(i,j,k)
+      
+      if (CS%use_NGM_K_LIM) then
+        if (abs(CS%KH_ux_NGM(I,j,k))>CS%NGM_K_LIM ) CS%KH_ux_NGM(I,j,k) = sign(CS%NGM_K_LIM, CS%KH_ux_NGM(I,j,k))
+        if (abs(CS%KH_uy_NGM(I,j,k))>CS%NGM_K_LIM ) CS%KH_uy_NGM(I,j,k) = sign(CS%NGM_K_LIM, CS%KH_uy_NGM(I,j,k))
+      endif 
+
     enddo; enddo 
     
     ! v components (on v point)
     do j=js-1,je ; do I=is,ie
-      CS%KH_vx_NGM(i,J,k) = - CS%NGM_const*G%areaCv(i,j)*0.5*(dvdx(i,j) + dvdx(i-1,j))
+      CS%KH_vx_NGM(i,J,k) = - CS%NGM_const*G%areaCv(i,j)*0.5*(dvdx(i,j) + dvdx(i-1,j)) * hv_mask(i,j,k)
       CS%KH_vy_NGM(i,J,k) = - CS%NGM_const*G%areaCv(i,j)*0.5*(dvdy(i,j+1) + dvdy(i,j))
+
+      if (CS%use_NGM_K_LIM) then
+        if (abs(CS%KH_vx_NGM(I,j,k))>CS%NGM_K_LIM ) CS%KH_vx_NGM(I,j,k) = sign(CS%NGM_K_LIM, CS%KH_vx_NGM(I,j,k))
+        if (abs(CS%KH_vy_NGM(I,j,k))>CS%NGM_K_LIM ) CS%KH_vy_NGM(I,j,k) = sign(CS%NGM_K_LIM, CS%KH_vy_NGM(I,j,k))
+      endif
+
     enddo; enddo 
 
   enddo
@@ -1612,6 +1650,12 @@ subroutine VarMix_init(Time, G, GV, US, param_file, diag, CS)
    call get_param(param_file, mdl, "C_NGM", CS%NGM_const, &
                 "The nondimensional NGM constant.", &
                 default=0.0, units="nondim")
+   call get_param(param_file, mdl, "USE_NGM_K_LIMIT", CS%use_NGM_K_LIM, &
+                "If true, limit the maximum values of NGM coefficient.", &
+                default=.false.)
+   call get_param(param_file, mdl, "C_NGM_K_LIM", CS%NGM_K_LIM, &
+                "The value to limit K by.", &
+                units="m2 s-1", default=1.0e7, scale=US%m_to_Z**2*US%T_to_s)
   
     ALLOC_(CS%KH_ux_NGM(IsdB:IedB,jsd:jed,GV%ke)) ; CS%KH_ux_NGM(:,:,:) = 0.0
     ALLOC_(CS%KH_uy_NGM(IsdB:IedB,jsd:jed,GV%ke)) ; CS%KH_uy_NGM(:,:,:) = 0.0

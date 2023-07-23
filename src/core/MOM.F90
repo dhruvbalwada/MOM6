@@ -1113,9 +1113,10 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
         call calc_slope_functions(h, CS%tv, dt, G, GV, US, CS%VarMix, OBC=CS%OBC)
       ! DB Added
       if (CS%VarMix%use_NGM) then 
-        call calc_NGM_diffusivity_tensor(u, v, G, GV, CS%VarMix)
+        call calc_NGM_diffusivity_tensor(u, v, h,  G, GV, CS%VarMix)
       endif
       !
+      !write(*,*) "just before TD starts"
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt_thermo, G, GV, US, &
                              CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp, CS%ann_CSp)
       call cpu_clock_end(id_clock_thick_diff)
@@ -1251,7 +1252,7 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
         call calc_slope_functions(h, CS%tv, dt, G, GV, US, CS%VarMix, OBC=CS%OBC)
       ! DB Added for NGM
       if (CS%VarMix%use_NGM) then 
-        call calc_NGM_diffusivity_tensor(u, v, G, GV, CS%VarMix)
+        call calc_NGM_diffusivity_tensor(u, v, h, G, GV, CS%VarMix)
       endif
       ! 
       ! DB Added for ANN
@@ -1259,7 +1260,7 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
       !  call ann(temp_x, temp_y, CS%ann_CSp)
         !write (*,*) "temp_y ->", temp_y
       !endif
-
+      !write(*,*) "Just befre"
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt, G, GV, US, &
                              CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp, CS%ann_CSp)
 
@@ -3000,7 +3001,7 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   ! DB ADDED 
   call ann_init(CS%ann_CSp, CS%use_ann, param_file)
   call thickness_diffuse_init(Time, G, GV, US, param_file, diag, CS%CDp, CS%thickness_diffuse_CSp, CS%use_ann)
-
+  !write(*,*) "in main"
   ! DB Added for ANN
   !if (CS%use_ANN) then
   !  call ann(temp_x, temp_y, CS%ann_CSp)
