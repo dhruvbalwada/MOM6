@@ -52,6 +52,8 @@ type, public :: thickness_diffuse_CS ; private
   logical :: thickness_diffuse   !< If true, interfaces heights are diffused.
   !! DB 
   logical :: USE_KHTH_TENSOR     !< If true, interface heights are diffused using 2X2 tensor
+  logical :: USE_TENSOR_CFL_LIM
+  real    :: TENSOR_CFL_LIM
   logical :: USE_ANN             !< If true, thickness diffusion is done use a Stream function computed from ANN     
   !!
   logical :: use_FGNV_streamfn   !< If true, use the streamfunction formulation of
@@ -1136,8 +1138,15 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             endif
 
             if (CS%USE_KHTH_TENSOR) then
-              Sfn_unlim_u(I,K) = ((KH_ux(I,j,K)*G%dy_Cu(I,j))*SlopeX + &
-                                  (KH_uy(I,j,K)*G%dy_Cu(I,j))*SlopeY)
+              
+              Sfn_unlim_u(I,K) = KH_ux(I,j,K)*SlopeX + KH_uy(I,j,K)*SlopeY ! = -KS (but slope sign is wrong)
+              
+              if (CS%USE_TENSOR_CFL_LIM) then
+                if ( abs(Sfn_unlim_u(I,K)) > CS%TENSOR_CFL_LIM * h(i,j,k) ) Sfn_unlim_u(I, K) = sign(CS%TENSOR_CFL_LIM * h(i,j,k), Sfn_unlim_u(I, K))
+              endif
+              
+              Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * G%dy_Cu(I,j) ! convert to volume flux form
+            
             else if (CS%use_ANN) then 
               Sfn_unlim_u(I,K) = Sfn_ann_x(I,j,K)
             else 
@@ -1462,8 +1471,14 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             endif
 
             if (CS%USE_KHTH_TENSOR) then
-              Sfn_unlim_v(i,K) = ((KH_vx(i,J,K)*G%dx_Cv(i,J))*SlopeX + &
-                                  (KH_vy(i,J,K)*G%dx_Cv(i,J))*SlopeY) 
+              Sfn_unlim_v(i,K) = KH_vx(i,J,K)*SlopeX + KH_vy(i,J,K)*SlopeY ! = -KS (but slope sign is wrong)
+              
+              if (CS%USE_TENSOR_CFL_LIM) then
+                if ( abs(Sfn_unlim_v(i,K)) > CS%TENSOR_CFL_LIM * h(i,j,k) ) Sfn_unlim_v(i, K) = sign(CS%TENSOR_CFL_LIM * h(i,j,k), Sfn_unlim_v(I, K))
+              endif
+              
+              Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) *G%dx_Cv(i,J)  ! convert to volume flux form
+                                  
             else if (CS%use_ANN) then
               Sfn_unlim_v(i,K) = Sfn_ann_y(i,J,K)
             else
@@ -2357,7 +2372,13 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
                  default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)
   call get_param(param_file, mdl, "KHTH_22", CS%Khth_22, &
                  "The background horizontal thickness diffusivity - K_22.", &
-                 default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)                 
+                 default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s) 
+  call get_param(param_file, mdl, "USE_TENSOR_CFL_LIM", CS%USE_TENSOR_CFL_LIM, &
+                 "If true, a CFL condition is imposed on NGM tensor diff", &
+                 default=.false.)
+  call get_param(param_file, mdl, "TENSOR_CFL_LIM", CS%TENSOR_CFL_LIM, &
+                 "The u* to limit the tensor velocity to.", &
+                 default=0.5, units="m s-1", scale=US%m_to_L*US%T_to_s)
   !!                 
   call get_param(param_file, mdl, "READ_KHTH", CS%read_khth, &
                  "If true, read a file (given by KHTH_FILE) containing the "//&
