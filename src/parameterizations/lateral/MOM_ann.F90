@@ -38,6 +38,8 @@ type, public :: ANN_CS ; private
     ! for now choose 3, as it works for me. 
     
     type(layer_type), allocatable :: layers(:)
+    real, allocatable :: input_norms(:), output_norms(:)
+    
     !real, allocatable :: A0(:,:), A1(:,:), A2(:,:) 
     !real, allocatable :: b0(:), b1(:), b2(:) 
 
@@ -73,11 +75,19 @@ subroutine ann_init(CS, use_ANN, param_file)
     call get_param(param_file, mdl, "ANN_PARAMS_FILE", CS%NNfile, &
                    "ANN parameters netcdf input", default="not_specified")
 
+    ! Read size of layers
     allocate(CS%layer_sizes(CS%num_layers))
 
     call MOM_read_data(CS%NNfile,"layer_sizes",CS%layer_sizes)
     write (*,*) "layer sizes", CS%layer_sizes
     !CS%layer_sizes = [2, 24, 24, 2]
+
+    ! Read norms
+    allocate(CS%input_norms(CS%layer_sizes(1)))
+    allocate(CS%output_norms(CS%layer_sizes(CS%num_layers)))
+
+    call MOM_read_data(CS%NNfile, 'input_norms', CS%input_norms)
+    call MOM_read_data(CS%NNfile, 'output_norms', CS%output_norms)
     
     ! Allocate the layers
     allocate(CS%layers(CS%num_layers-1)) ! since this contains the matrices that move info from one layer to another, it is one size smaller. 
@@ -98,14 +108,14 @@ subroutine ann_init(CS, use_ANN, param_file)
         call MOM_read_data(CS%NNfile, matrix_name, CS%layers(i)%A, &
                             (/1,1,1,1/),(/CS%layers(i)%output_width,CS%layers(i)%input_width,1,1/))
 
-        write (*,*) "Reading", matrix_name, CS%layers(i)%A
+        !write (*,*) "Reading", matrix_name, CS%layers(i)%A
 
 
         allocate(CS%layers(i)%b(CS%layers(i)%output_width), source=0.)
         matrix_name = trim(b) // trim(layer_num_str)
         !write (*,*) "Reading", matrix_name
         call MOM_read_data(CS%NNfile, matrix_name, CS%layers(i)%b)
-        write (*,*) "Reading", matrix_name, CS%layers(i)%b
+        !write (*,*) "Reading", matrix_name, CS%layers(i)%b
     enddo
 
 end subroutine ann_init
@@ -124,9 +134,15 @@ subroutine ann(x, y, CS)
     real, allocatable :: x_1(:), x_2(:) ! intermediate states. 
     integer :: i
 
+    !write(*,*) x
     ! start by allocating and assigning the input
     allocate(x_1(CS%layer_sizes(1)), source=0.)
     x_1 = x
+    ! Normalize input
+    do i = 1,CS%layer_sizes(1)
+        x_1(i) = x_1(i) / CS%input_norms(i)
+    enddo
+    
     !write(*,*) "input", x_1, "size", CS%layer_sizes(1)
 
     do i = 1, CS%num_layers -1 
@@ -151,6 +167,13 @@ subroutine ann(x, y, CS)
     enddo
     ! Finally assign output, which goes out. 
     y = x_1
+
+    ! un-normalize output
+    do i = 1, CS%layer_sizes(CS%num_layers)
+        y(i) = y(i) * CS%output_norms(i)
+    enddo
+
+
 
 
 end subroutine ann

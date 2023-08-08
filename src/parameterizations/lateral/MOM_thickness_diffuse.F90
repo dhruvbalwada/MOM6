@@ -144,7 +144,7 @@ contains
 !! by modifying to the layer thicknesses, h. Diffusivities are limited to ensure stability.
 !! Also returns along-layer mass fluxes used in the continuity equation.
 subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, &
-                             MEKE, VarMix, CDp, CS, ANN_CSp)
+                             MEKE, VarMix, CDp, CS, ANN_CSp, u, v)
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
@@ -161,7 +161,8 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, &
   type(thickness_diffuse_CS),                 intent(inout) :: CS     !< Control structure for thickness_diffuse
   
   type(ANN_CS),                     optional, intent(in)    :: ANN_CSp !< Control structure for ANN
-  
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), optional, intent(in) :: u
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), optional, intent(in) :: v
 
   ! Local variables
   real :: e(SZI_(G),SZJ_(G),SZK_(GV)+1) ! heights of interfaces, relative to mean
@@ -566,7 +567,7 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, &
       !write(*,*) "Using ANN"
       ! Use stored slopes and ANN
       call streamfn_ann(CS%Sfn_ann_x, CS%Sfn_ann_y, VarMix%slope_x, VarMix%slope_y, ANN_CSp, &
-                        G, GV)
+                        G, GV, u, v)
       call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                   int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
                                   Sfn_ann_x=CS%Sfn_ann_x, Sfn_ann_y=CS%Sfn_ann_y)
@@ -1149,6 +1150,7 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             
             else if (CS%use_ANN) then 
               Sfn_unlim_u(I,K) = Sfn_ann_x(I,j,K)
+              Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * G%dy_Cu(I,j) ! convert to volume flux form
             else 
               Sfn_unlim_u(I,K) = ((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope) ! there is double sign error here, which cancels out
             endif
@@ -1481,6 +1483,7 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
                                   
             else if (CS%use_ANN) then
               Sfn_unlim_v(i,K) = Sfn_ann_y(i,J,K)
+              Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) *G%dx_Cv(i,J)  ! convert to volume flux form
             else
               Sfn_unlim_v(i,K) = ((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
             endif
@@ -1753,7 +1756,7 @@ end subroutine thickness_mask_3D
 !> Calculates the additional streamfunction using the appropriate inputs
 !! Returns psi_ann, which is summed in thickness_diffuse_full with the psi = -KS
 !! Called by thickness diffuse()
-subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV)
+subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV, u, v)
   type(ocean_grid_type),                        intent(in)  :: G     !< Ocean grid structure
   type(verticalGrid_type),                      intent(in)  :: GV    !< Vertical grid structure
   type(ann_cs),                                 intent(in)  :: ANN_CSp
@@ -1761,34 +1764,61 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV)
   real, dimension(SZI_(G), SZJB_(G), SZK_(GV)+1), intent(out) :: Sfn_ann_y ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1),  intent(in)  :: slope_x !< Isopyc. slope at u [Z L-1 ~> nondim]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1),  intent(in)  :: slope_y !< Isopyc. slope at v [Z L-1 ~> nondim]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),  intent(in)  :: u !< u vel
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),  intent(in)  :: v !< v vel
 
 ! local variables 
   integer i, j, k, is, ie, js, je, nz
 
-  real, dimension(2) :: x, y
+  real, dimension(6) :: x
+  real, dimension(2) :: y
+
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: dudx_u, dudy_u, dvdx_u, dvdy_u !< u vel
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: dudx_v, dudy_v, dvdx_v, dvdy_v !< v vel
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
 
   ! these loops below are slightly adhoc. In principle we might
   ! not be wanting to run twice. 
-  !  stream function on u points
+  
   !write(*,*) "here"
-  x(1) = 21.
-  x(2) = 12. 
-  call ann(x, y, ANN_CSp)
+  
+  !! Test code
+  !x(1) = 21.
+  !x(2) = 12.
+  !x(3) = 0. 
+  !x(4) = 0. 
+  !x(5) = 0. 
+  !x(6) = 0. 
+
+  !write(*,*) x
+  !call ann(x, y, ANN_CSp)
   !write(*,*) "x", x, "y", y
 
- 
+  call vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
+  
+ !  stream function on u points
   do i = is-1, ie
     do j = js, je
       do k = 2, nz ! not setting values at the surface and bottom.
         
-        x(1) = slope_x(i,j,k)
-        x(2) = 0. !slope_y(i,j,k)
+        ! Input order u_x, u_y, v_x, v_y
+        x(1) = 0.5*(dudx_u(i,j,k-1) + dudx_u(i,j,k))
+        x(2) = 0.5*(dudy_u(i,j,k-1) + dudy_u(i,j,k))
+        x(3) = 0.5*(dvdx_u(i,j,k-1) + dvdx_u(i,j,k))
+        x(4) = 0.5*(dvdy_u(i,j,k-1) + dvdy_u(i,j,k))
+        !x(5) = slope_x(i,j,k) 
+        !x(6) = slope_x(i,j,k) 
+        x(5) = - slope_x(I,j,k) * G%mask2dCu(I,j)  ! ugh we need a minus sign for the slope here because without EOS the sign of slope in MOM6 is wrong.
+        x(6) = - 0.25*(slope_y(I,j,k) * G%mask2dCv(I,j)  + &
+                     slope_y(I,j-1,k) * G%mask2dCv(I,j-1)  + &
+                     slope_y(I+1,j,k)* G%mask2dCv(I+1,j)  + &
+                     slope_y(I+1, j-1, k)* G%mask2dCv(I+1,j-1)  ) *  &
+                     G%mask2dCu(I,j) 
 
         call ann(x,y, ANN_CSp)
         
-        Sfn_ann_x(i,j,k) = y(1)
+        Sfn_ann_x(i,j,k) = y(1) 
         !Sfn_ann_y(i,j,k) = y(2)
 
       enddo
@@ -1800,13 +1830,23 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV)
     do j = js-1, je
       do k = 2, nz ! not setting values at the surface and bottom.
         
-        x(1) = 0. !slope_x(i,j,k)
-        x(2) = slope_y(i,j,k)
+        x(1) = 0.5*(dudx_v(i,j,k-1) + dudx_v(i,j,k))
+        x(2) = 0.5*(dudy_v(i,j,k-1) + dudy_v(i,j,k))
+        x(3) = 0.5*(dvdx_v(i,j,k-1) + dvdx_v(i,j,k))
+        x(4) = 0.5*(dvdy_v(i,j,k-1) + dvdy_v(i,j,k))
+        !x(5) = slope_y(i,j,k)
+        !x(6) = slope_y(i,j,k)
+        x(5) = - 0.25*(slope_x(i,J,k) * G%mask2dCu(i,J) + &
+                               slope_x(i-1,J,k) * G%mask2dCu(i-1,J)  + &
+                               slope_x(i,J+1,k) * G%mask2dCu(i,J+1) + &
+                               slope_x(i-1,J+1,k)* G%mask2dCu(i-1,J+1)  ) * &
+                               G%mask2dCv(i,J) 
+        x(6) = - slope_y(i,J,k) * G%mask2dCv(i,J)
 
         call ann(x,y, ANN_CSp)
         
         !Sfn_ann_x(i,j,k) = y(1)
-        Sfn_ann_y(i,j,k) = y(2)
+        Sfn_ann_y(i,j,k) = y(2) 
 
       enddo
     enddo
@@ -1814,6 +1854,67 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV)
 
 
 end subroutine streamfn_ann
+
+! Computes velocity gradients at u and v points
+subroutine vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
+  type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
+  type(verticalGrid_type),                   intent(in)    :: GV  !< The ocean's vertical grid structure.
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(in)    :: u   !< The zonal velocity [L T-1 ~> m s-1].
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(in)    :: v   !< The meridional velocity [L T-1 ~> m s-1].
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(out)   :: dudx_u, dudy_u, dvdx_u, dvdy_u   !< Velocity gradients at u point
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(out)   :: dudx_v, dudy_v, dvdx_v, dvdy_v
+
+  ! Center points 
+  real, dimension(SZI_(G),SZJ_(G)) :: &
+    dudx, dvdy   !
+  ! Corner points
+  real, dimension(SZIB_(G), SZJB_(G)) :: &
+    dudy, dvdx   
+  integer :: is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
+  integer :: i, j, k, n
+  
+  ! Line 407 of MOM_hor_visc.F90
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+  Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
+  
+  do k=1, nz
+    ! Copy code from MOM_hor_visc.F90
+    ! Calculate velocity gradients at center points
+    do j=Jsq-1,Jeq+2 ; do i=Isq-1,Ieq+2
+      dudx(i,j) = G%IdxT(i,j)*(u(I,j,k)   - u(I-1,j,k)  ) * G%mask2dT(I,j)
+      dvdy(i,j) = G%IdyT(i,j)*(v(i,J,k)   - v(i,J-1,k)  ) * G%mask2dT(I,j)
+    enddo ; enddo
+
+    ! Calculate velocity gradients at corner points
+    do J=Jsq-2,Jeq+2 ; do I=Isq-2,Ieq+2
+      dvdx(I,J) = G%IdxBu(I,J)*(v(i+1,J,k)  - v(i,J,k) ) * G%mask2dBu(I,j)
+      dudy(I,J) = G%IdyBu(I,J)*(u(I,j+1,k)  - u(I,j,k) ) * G%mask2dBu(I,j)
+    enddo ; enddo
+
+    ! u gradients
+    do j=js,je ; do I=is-1,ie
+      dudx_u(i,j,k) = 0.5*(dudx(i+1,j) + dudx(i,j))
+      dudy_u(i,j,k) = 0.5*(dudy(i,j) + dudy(i,j-1))
+      dvdx_u(i,j,k) = 0.5*(dvdx(i,j) + dvdy(i,j-1))
+      dvdy_u(i,j,k) = 0.5*(dvdy(i+1,j) + dvdy(i,j))
+    enddo; enddo
+
+    ! v gradients
+    do j=js-1,je ; do I=is,ie
+      dvdx_v(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i-1,j))
+      dvdy_v(i,j,k) = 0.5*(dvdy(i,j+1) + dvdy(i,j))
+      dudx_v(i,j,k) = 0.5*(dudx(i,j+1) + dudx(i,j))
+      dudy_v(i,j,k) = 0.5*(dudy(i,j) + dudy(i-1,j))
+    enddo; enddo
+
+  enddo
+
+
+
+end subroutine vel_gradients
+
+
+
 
 !> Tridiagonal solver for streamfunction at interfaces
 subroutine streamfn_solver(nk, c2_h, hN2, sfn)
