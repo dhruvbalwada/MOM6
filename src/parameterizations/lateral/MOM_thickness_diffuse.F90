@@ -55,6 +55,7 @@ type, public :: thickness_diffuse_CS ; private
   logical :: USE_TENSOR_CFL_LIM
   real    :: TENSOR_CFL_LIM
   logical :: USE_ANN             !< If true, thickness diffusion is done use a Stream function computed from ANN     
+  real    :: ANN_const           !< An amplification constant that multiplies the stream function returned from ANN.
   !!
   logical :: use_FGNV_streamfn   !< If true, use the streamfunction formulation of
                                  !! Ferrari et al., 2010, which effectively emphasizes
@@ -567,7 +568,7 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, &
       !write(*,*) "Using ANN"
       ! Use stored slopes and ANN
       call streamfn_ann(CS%Sfn_ann_x, CS%Sfn_ann_y, VarMix%slope_x, VarMix%slope_y, ANN_CSp, &
-                        G, GV, u, v)
+                        CS, G, GV, u, v)
       call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                   int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
                                   Sfn_ann_x=CS%Sfn_ann_x, Sfn_ann_y=CS%Sfn_ann_y)
@@ -1756,7 +1757,7 @@ end subroutine thickness_mask_3D
 !> Calculates the additional streamfunction using the appropriate inputs
 !! Returns psi_ann, which is summed in thickness_diffuse_full with the psi = -KS
 !! Called by thickness diffuse()
-subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV, u, v)
+subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, CS, G, GV, u, v)
   type(ocean_grid_type),                        intent(in)  :: G     !< Ocean grid structure
   type(verticalGrid_type),                      intent(in)  :: GV    !< Vertical grid structure
   type(ann_cs),                                 intent(in)  :: ANN_CSp
@@ -1766,6 +1767,7 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV, 
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1),  intent(in)  :: slope_y !< Isopyc. slope at v [Z L-1 ~> nondim]
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),  intent(in)  :: u !< u vel
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),  intent(in)  :: v !< v vel
+  type(thickness_diffuse_CS), intent(inout) :: CS !< Control structure for thickness_diffuse
 
 ! local variables 
   integer i, j, k, is, ie, js, je, nz
@@ -1818,7 +1820,7 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV, 
 
         call ann(x,y, ANN_CSp)
         
-        Sfn_ann_x(i,j,k) = y(1) 
+        Sfn_ann_x(i,j,k) = CS%ANN_const * y(1) 
         !Sfn_ann_y(i,j,k) = y(2)
 
       enddo
@@ -1846,12 +1848,11 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, G, GV, 
         call ann(x,y, ANN_CSp)
         
         !Sfn_ann_x(i,j,k) = y(1)
-        Sfn_ann_y(i,j,k) = y(2) 
+        Sfn_ann_y(i,j,k) = CS%ANN_const * y(2) 
 
       enddo
     enddo
   enddo
-
 
 end subroutine streamfn_ann
 
@@ -2458,6 +2459,9 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   !               "If true, turns on the ANN", default=.false.)
   ! add's parameters for KHTH_tensor
   CS%use_ANN = use_ANN
+  call get_param(param_file, mdl, "C_ANN", CS%ANN_const, &
+                "The nondimensional ANN amplification constant.", &
+                default=1.0, units="nondim")
   !!
   call get_param(param_file, mdl, "USE_KHTH_TENSOR", CS%USE_KHTH_TENSOR, &
                  "If true, 2X2 tensor is used for diffusing interface heights", &

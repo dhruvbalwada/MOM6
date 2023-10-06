@@ -79,7 +79,7 @@ subroutine ann_init(CS, use_ANN, param_file)
     allocate(CS%layer_sizes(CS%num_layers))
 
     call MOM_read_data(CS%NNfile,"layer_sizes",CS%layer_sizes)
-    write (*,*) "layer sizes", CS%layer_sizes
+    !write (*,*) "layer sizes", CS%layer_sizes
     !CS%layer_sizes = [2, 24, 24, 2]
 
     ! Read norms
@@ -97,7 +97,7 @@ subroutine ann_init(CS, use_ANN, param_file)
         CS%layers(i)%output_width = CS%layer_sizes(i+1)
         CS%layers(i)%input_width = CS%layer_sizes(i)
 
-        write(layer_num_str, '(I0)') i-1
+        !write(layer_num_str, '(I0)') i-1
         ! note that the order of dimensions is reversed
         ! https://stackoverflow.com/questions/47085101/netcdf-startcount-exceeds-dimension-bound
         allocate(CS%layers(i)%A(CS%layers(i)%output_width, CS%layers(i)%input_width), source=0.)
