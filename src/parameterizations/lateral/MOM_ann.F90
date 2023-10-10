@@ -97,12 +97,12 @@ subroutine ann_init(CS, use_ANN, param_file)
         CS%layers(i)%output_width = CS%layer_sizes(i+1)
         CS%layers(i)%input_width = CS%layer_sizes(i)
 
-        !write(layer_num_str, '(I0)') i-1
+        write(layer_num_str, '(I0)') i-1
         ! note that the order of dimensions is reversed
         ! https://stackoverflow.com/questions/47085101/netcdf-startcount-exceeds-dimension-bound
         allocate(CS%layers(i)%A(CS%layers(i)%output_width, CS%layers(i)%input_width), source=0.)
         matrix_name = trim(A) // trim(layer_num_str)
-        !write (*,*) "Reading", matrix_name, "Size", CS%layers(i)%input_width, CS%layers(i)%output_width
+        write (*,*) "Reading", matrix_name, "Size", CS%layers(i)%input_width, CS%layers(i)%output_width
         ! How to read in 2D?
         ! What is the weird format? 
         call MOM_read_data(CS%NNfile, matrix_name, CS%layers(i)%A, &

@@ -1775,102 +1775,135 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, CS, G, 
   real, dimension(6) :: x
   real, dimension(2) :: y
 
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: dudx_u, dudy_u, dvdx_u, dvdy_u !< u vel
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: dudx_v, dudy_v, dvdx_v, dvdy_v !< v vel
+  !real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: dudx_u, dudy_u, dvdx_u, dvdy_u !< u vel
+  !real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: dudx_v, dudy_v, dvdx_v, dvdy_v !< v vel
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudx_C, dudy_C, dvdx_C, dvdy_C !< C vel points
+  real, dimension(SZI_(G), SZJ_(G), SZK_(GV)+1) :: Sfn_ann_xC ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZI_(G), SZJ_(G), SZK_(GV)+1) :: Sfn_ann_yC
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
 
-  ! these loops below are slightly adhoc. In principle we might
-  ! not be wanting to run twice. 
-  
-  !write(*,*) "here"
-  
-  !! Test code
-  !x(1) = 21.
-  !x(2) = 12.
-  !x(3) = 0. 
-  !x(4) = 0. 
-  !x(5) = 0. 
-  !x(6) = 0. 
+  !!! Method for computing on T points and then interpolate out 
+  call vel_gradients(u, v, G, GV, dudx_C=dudx_C, dudy_C=dudy_C, dvdx_C=dvdx_C, dvdy_C=dvdy_C)
+  do i = is-1, ie+1
+    do j = js-1, je+1
+      do k = 2, nz
+        ! need to be vertically interpolated
+        x(1) = 0.5*(dudx_C(i,j,k-1) + dudx_C(i,j,k))
+        x(2) = 0.5*(dudy_C(i,j,k-1) + dudy_C(i,j,k))
+        x(3) = 0.5*(dvdx_C(i,j,k-1) + dvdx_C(i,j,k))
+        x(4) = 0.5*(dvdy_C(i,j,k-1) + dvdy_C(i,j,k))
+        ! Need to be horizontally interpolated
+        x(5) = 0.5*(slope_x(i,j,k) + slope_x(i-1,j,k))
+        x(6) = 0.5*(slope_y(i,j,k) + slope_y(i,j-1,k))
+        x(7) = 5.*G%dxT(i,j)/1000. ! Where 5 if the FGR
+        !write(*,*) x(7)
 
-  !write(*,*) x
-  !call ann(x, y, ANN_CSp)
-  !write(*,*) "x", x, "y", y
+        call ann(x,y, ANN_CSp)
 
-  call vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
-  
- !  stream function on u points
+        Sfn_ann_xC(i,j,k) = CS%ANN_const * y(1)
+        Sfn_ann_yC(i,j,k) = CS%ANN_const * y(2)
+      enddo
+    enddo
+  enddo
+
+  ! Interpolate out to u points
   do i = is-1, ie
     do j = js, je
-      do k = 2, nz ! not setting values at the surface and bottom.
-        
-        ! Input order u_x, u_y, v_x, v_y
-        x(1) = 0.5*(dudx_u(i,j,k-1) + dudx_u(i,j,k))
-        x(2) = 0.5*(dudy_u(i,j,k-1) + dudy_u(i,j,k))
-        x(3) = 0.5*(dvdx_u(i,j,k-1) + dvdx_u(i,j,k))
-        x(4) = 0.5*(dvdy_u(i,j,k-1) + dvdy_u(i,j,k))
-        !x(5) = slope_x(i,j,k) 
-        !x(6) = slope_x(i,j,k) 
-        x(5) = - slope_x(I,j,k) * G%mask2dCu(I,j)  ! ugh we need a minus sign for the slope here because without EOS the sign of slope in MOM6 is wrong.
-        x(6) = - 0.25*(slope_y(I,j,k) * G%mask2dCv(I,j)  + &
-                     slope_y(I,j-1,k) * G%mask2dCv(I,j-1)  + &
-                     slope_y(I+1,j,k)* G%mask2dCv(I+1,j)  + &
-                     slope_y(I+1, j-1, k)* G%mask2dCv(I+1,j-1)  ) *  &
-                     G%mask2dCu(I,j) 
-
-        call ann(x,y, ANN_CSp)
-        
-        Sfn_ann_x(i,j,k) = CS%ANN_const * y(1) 
-        !Sfn_ann_y(i,j,k) = y(2)
-
+      do k = 2, nz
+        Sfn_ann_x(i,j,k) = 0.5*(Sfn_ann_xC(i,j,k) + Sfn_ann_xC(i+1,j,k))
       enddo
     enddo
   enddo
-
-  !  stream function on v points
+  ! Interpolate to v points
   do i = is, ie
     do j = js-1, je
-      do k = 2, nz ! not setting values at the surface and bottom.
-        
-        x(1) = 0.5*(dudx_v(i,j,k-1) + dudx_v(i,j,k))
-        x(2) = 0.5*(dudy_v(i,j,k-1) + dudy_v(i,j,k))
-        x(3) = 0.5*(dvdx_v(i,j,k-1) + dvdx_v(i,j,k))
-        x(4) = 0.5*(dvdy_v(i,j,k-1) + dvdy_v(i,j,k))
-        !x(5) = slope_y(i,j,k)
-        !x(6) = slope_y(i,j,k)
-        x(5) = - 0.25*(slope_x(i,J,k) * G%mask2dCu(i,J) + &
-                               slope_x(i-1,J,k) * G%mask2dCu(i-1,J)  + &
-                               slope_x(i,J+1,k) * G%mask2dCu(i,J+1) + &
-                               slope_x(i-1,J+1,k)* G%mask2dCu(i-1,J+1)  ) * &
-                               G%mask2dCv(i,J) 
-        x(6) = - slope_y(i,J,k) * G%mask2dCv(i,J)
-
-        call ann(x,y, ANN_CSp)
-        
-        !Sfn_ann_x(i,j,k) = y(1)
-        Sfn_ann_y(i,j,k) = CS%ANN_const * y(2) 
-
+      do k = 2, nz
+        Sfn_ann_y(i,j,k) = 0.5*(Sfn_ann_yC(i,j,k) + Sfn_ann_yC(i,j+1,k))
       enddo
     enddo
   enddo
+
+  !!! Method for computing on u and v points separately
+  ! !! The problem here is that the ANN gets called twice, this adds time. 
+  
+  ! call vel_gradients(u, v, G, GV, dudx_u=dudx_u, dudy_u=dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
+  
+ !  stream function on u points
+ ! do i = is-1, ie
+ !   do j = js, je
+  !     do k = 2, nz ! not setting values at the surface and bottom.
+        
+  !       ! Input order u_x, u_y, v_x, v_y
+  !       x(1) = 0.5*(dudx_u(i,j,k-1) + dudx_u(i,j,k))
+  !       x(2) = 0.5*(dudy_u(i,j,k-1) + dudy_u(i,j,k))
+  !       x(3) = 0.5*(dvdx_u(i,j,k-1) + dvdx_u(i,j,k))
+  !       x(4) = 0.5*(dvdy_u(i,j,k-1) + dvdy_u(i,j,k))
+  !       !x(5) = slope_x(i,j,k) 
+  !       !x(6) = slope_x(i,j,k) 
+  !       x(5) = - slope_x(I,j,k) * G%mask2dCu(I,j)  ! ugh we need a minus sign for the slope here because without EOS the sign of slope in MOM6 is wrong.
+  !       x(6) = - 0.25*(slope_y(I,j,k) * G%mask2dCv(I,j)  + &
+  !                   slope_y(I,j-1,k) * G%mask2dCv(I,j-1)  + &
+  !                   slope_y(I+1,j,k)* G%mask2dCv(I+1,j)  + &
+  !                   slope_y(I+1, j-1, k)* G%mask2dCv(I+1,j-1)  ) *  &
+  !                   G%mask2dCu(I,j) 
+
+  !       call ann(x,y, ANN_CSp)
+        
+  !       Sfn_ann_x(i,j,k) = CS%ANN_const * y(1) 
+  !       !Sfn_ann_y(i,j,k) = y(2)
+
+  !     enddo
+  !   enddo
+  ! enddo
+
+  !  stream function on v points
+  ! do i = is, ie
+  !   do j = js-1, je
+  !     do k = 2, nz ! not setting values at the surface and bottom.
+        
+  !       x(1) = 0.5*(dudx_v(i,j,k-1) + dudx_v(i,j,k))
+  !       x(2) = 0.5*(dudy_v(i,j,k-1) + dudy_v(i,j,k))
+  !       x(3) = 0.5*(dvdx_v(i,j,k-1) + dvdx_v(i,j,k))
+  !       x(4) = 0.5*(dvdy_v(i,j,k-1) + dvdy_v(i,j,k))
+  !       !x(5) = slope_y(i,j,k)
+  !       !x(6) = slope_y(i,j,k)
+  !       x(5) = - 0.25*(slope_x(i,J,k) * G%mask2dCu(i,J) + &
+  !                             slope_x(i-1,J,k) * G%mask2dCu(i-1,J)  + &
+  !                             slope_x(i,J+1,k) * G%mask2dCu(i,J+1) + &
+  !                             slope_x(i-1,J+1,k)* G%mask2dCu(i-1,J+1)  ) * &
+  !                             G%mask2dCv(i,J) 
+  !       x(6) = - slope_y(i,J,k) * G%mask2dCv(i,J)
+
+  !       call ann(x,y, ANN_CSp)
+        
+  !       !Sfn_ann_x(i,j,k) = y(1)
+  !       Sfn_ann_y(i,j,k) = CS%ANN_const * y(2) 
+
+  !     enddo
+  !   enddo
+  ! enddo
 
 end subroutine streamfn_ann
 
-! Computes velocity gradients at u and v points
-subroutine vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
+! Computes velocity gradients at u, v, C points
+subroutine vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, & 
+                                      dudx_v, dudy_v, dvdx_v, dvdy_v, &
+                                      dudx_C, dudy_C, dvdx_C, dvdy_C )
+
   type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
   type(verticalGrid_type),                   intent(in)    :: GV  !< The ocean's vertical grid structure.
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(in)    :: u   !< The zonal velocity [L T-1 ~> m s-1].
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(in)    :: v   !< The meridional velocity [L T-1 ~> m s-1].
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(out)   :: dudx_u, dudy_u, dvdx_u, dvdy_u   !< Velocity gradients at u point
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(out)   :: dudx_v, dudy_v, dvdx_v, dvdy_v
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), optional, intent(out)   :: dudx_u, dudy_u, dvdx_u, dvdy_u   !< Velocity gradients at u point
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), optional, intent(out)   :: dudx_v, dudy_v, dvdx_v, dvdy_v
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), optional, intent(out)   :: dudx_C, dudy_C, dvdx_C, dvdy_C
 
   ! Center points 
-  real, dimension(SZI_(G),SZJ_(G)) :: &
-    dudx, dvdy   !
+  real, dimension(SZI_(G),SZJ_(G)) :: dudx, dvdy   
   ! Corner points
-  real, dimension(SZIB_(G), SZJB_(G)) :: &
-    dudy, dvdx   
+  real, dimension(SZIB_(G), SZJB_(G)) :: dudy, dvdx   
+
   integer :: is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
   integer :: i, j, k, n
   
@@ -1878,6 +1911,7 @@ subroutine vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, du
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
   
+  !write(*,*) "entering the ocean"
   do k=1, nz
     ! Copy code from MOM_hor_visc.F90
     ! Calculate velocity gradients at center points
@@ -1893,24 +1927,30 @@ subroutine vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, du
     enddo ; enddo
 
     ! u gradients
-    do j=js,je ; do I=is-1,ie
-      dudx_u(i,j,k) = 0.5*(dudx(i+1,j) + dudx(i,j))
-      dudy_u(i,j,k) = 0.5*(dudy(i,j) + dudy(i,j-1))
-      dvdx_u(i,j,k) = 0.5*(dvdx(i,j) + dvdy(i,j-1))
-      dvdy_u(i,j,k) = 0.5*(dvdy(i+1,j) + dvdy(i,j))
-    enddo; enddo
+    ! do j=js,je ; do I=is-1,ie
+    !   dudx_u(i,j,k) = 0.5*(dudx(i+1,j) + dudx(i,j))
+    !   dudy_u(i,j,k) = 0.5*(dudy(i,j) + dudy(i,j-1))
+    !   dvdx_u(i,j,k) = 0.5*(dvdx(i,j) + dvdy(i,j-1))
+    !   dvdy_u(i,j,k) = 0.5*(dvdy(i+1,j) + dvdy(i,j))
+    ! enddo; enddo
 
     ! v gradients
-    do j=js-1,je ; do I=is,ie
-      dvdx_v(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i-1,j))
-      dvdy_v(i,j,k) = 0.5*(dvdy(i,j+1) + dvdy(i,j))
-      dudx_v(i,j,k) = 0.5*(dudx(i,j+1) + dudx(i,j))
-      dudy_v(i,j,k) = 0.5*(dudy(i,j) + dudy(i-1,j))
+    ! do j=js-1,je ; do I=is,ie
+    !   dvdx_v(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i-1,j))
+    !   dvdy_v(i,j,k) = 0.5*(dvdy(i,j+1) + dvdy(i,j))
+    !   dudx_v(i,j,k) = 0.5*(dudx(i,j+1) + dudx(i,j))
+    !   dudy_v(i,j,k) = 0.5*(dudy(i,j) + dudy(i-1,j))
+    ! enddo; enddo
+
+    ! Center (h) points
+    do J=js-1, je+1; do I=is-1, ie+1
+      dudx_C(i,j,k) = dudx(i,j)
+      dudy_C(i,j,k) = 0.25*(dudy(i,j) + dudy(i,j-1) + dudy(i-1,j) + dudy(i-1,j-1))
+      dvdx_C(i,j,k) = 0.25*(dvdy(i,j) + dvdy(i,j-1) + dvdy(i-1,j) + dvdy(i-1,j-1))
+      dvdy_C(i,j,k) = dvdy(i,j)
     enddo; enddo
 
   enddo
-
-
 
 end subroutine vel_gradients
 
