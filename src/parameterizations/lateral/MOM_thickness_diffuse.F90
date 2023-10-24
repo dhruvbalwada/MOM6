@@ -56,6 +56,7 @@ type, public :: thickness_diffuse_CS ; private
   real    :: TENSOR_CFL_LIM
   logical :: USE_ANN             !< If true, thickness diffusion is done use a Stream function computed from ANN     
   logical :: ANN_USE_clip
+  logical :: USE_UPSLOPE_LIM
   real    :: ANN_const           !< An amplification constant that multiplies the stream function returned from ANN.
   real    :: ANN_grad_supp
   real    :: ANN_grad_clip
@@ -1172,21 +1173,23 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             ! DB copied this code from EOS (why was this not part of this before?)
             ! Avoid moving dense water upslope from below the level of
             ! the bottom on the receiving side.
-            if (Sfn_unlim_u(I,K) > 0.0) then ! The flow below this interface is positive.
-              if (e(i,j,K) < e(i+1,j,nz+1)) then
-                Sfn_unlim_u(I,K) = 0.0 ! This is not uhtot, because it may compensate for
-                                ! deeper flow in very unusual cases.
-              elseif (e(i+1,j,nz+1) > e(i,j,K+1)) then
-                ! Scale the transport with the fraction of the donor layer above
-                ! the bottom on the receiving side.
-                Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * ((e(i,j,K) - e(i+1,j,nz+1)) / &
-                                         ((e(i,j,K) - e(i,j,K+1)) + dz_neglect))
-              endif
-            else
-              if (e(i+1,j,K) < e(i,j,nz+1)) then ; Sfn_unlim_u(I,K) = 0.0
-              elseif (e(i,j,nz+1) > e(i+1,j,K+1)) then
-                Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * ((e(i+1,j,K) - e(i,j,nz+1)) / &
-                                       ((e(i+1,j,K) - e(i+1,j,K+1)) + dz_neglect))
+            if (CS%USE_UPSLOPE_LIM) then 
+              if (Sfn_unlim_u(I,K) > 0.0) then ! The flow below this interface is positive.
+                if (e(i,j,K) < e(i+1,j,nz+1)) then
+                  Sfn_unlim_u(I,K) = 0.0 ! This is not uhtot, because it may compensate for
+                                  ! deeper flow in very unusual cases.
+                elseif (e(i+1,j,nz+1) > e(i,j,K+1)) then
+                  ! Scale the transport with the fraction of the donor layer above
+                  ! the bottom on the receiving side.
+                  Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * ((e(i,j,K) - e(i+1,j,nz+1)) / &
+                                          ((e(i,j,K) - e(i,j,K+1)) + dz_neglect))
+                endif
+              else
+                if (e(i+1,j,K) < e(i,j,nz+1)) then ; Sfn_unlim_u(I,K) = 0.0
+                elseif (e(i,j,nz+1) > e(i+1,j,K+1)) then
+                  Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * ((e(i+1,j,K) - e(i,j,nz+1)) / &
+                                        ((e(i+1,j,K) - e(i+1,j,K+1)) + dz_neglect))
+                endif
               endif
             endif
 
@@ -1504,21 +1507,23 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             
             ! Avoid moving dense water upslope from below the level of
             ! the bottom on the receiving side.
-            if (Sfn_unlim_v(i,K) > 0.0) then ! The flow below this interface is positive.
-              if (e(i,j,K) < e(i,j+1,nz+1)) then
-                Sfn_unlim_v(i,K) = 0.0 ! This is not vhtot, because it may compensate for
-                                ! deeper flow in very unusual cases.
-              elseif (e(i,j+1,nz+1) > e(i,j,K+1)) then
-                ! Scale the transport with the fraction of the donor layer above
-                ! the bottom on the receiving side.
-                Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) * ((e(i,j,K) - e(i,j+1,nz+1)) / &
-                                         ((e(i,j,K) - e(i,j,K+1)) + dz_neglect))
-              endif
-            else
-              if (e(i,j+1,K) < e(i,j,nz+1)) then ; Sfn_unlim_v(i,K) = 0.0
-              elseif (e(i,j,nz+1) > e(i,j+1,K+1)) then
-                Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) * ((e(i,j+1,K) - e(i,j,nz+1)) / &
-                                       ((e(i,j+1,K) - e(i,j+1,K+1)) + dz_neglect))
+            if (CS%USE_UPSLOPE_LIM) then 
+              if (Sfn_unlim_v(i,K) > 0.0) then ! The flow below this interface is positive.
+                if (e(i,j,K) < e(i,j+1,nz+1)) then
+                  Sfn_unlim_v(i,K) = 0.0 ! This is not vhtot, because it may compensate for
+                                  ! deeper flow in very unusual cases.
+                elseif (e(i,j+1,nz+1) > e(i,j,K+1)) then
+                  ! Scale the transport with the fraction of the donor layer above
+                  ! the bottom on the receiving side.
+                  Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) * ((e(i,j,K) - e(i,j+1,nz+1)) / &
+                                          ((e(i,j,K) - e(i,j,K+1)) + dz_neglect))
+                endif
+              else
+                if (e(i,j+1,K) < e(i,j,nz+1)) then ; Sfn_unlim_v(i,K) = 0.0
+                elseif (e(i,j,nz+1) > e(i,j+1,K+1)) then
+                  Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) * ((e(i,j+1,K) - e(i,j,nz+1)) / &
+                                        ((e(i,j+1,K) - e(i,j+1,K+1)) + dz_neglect))
+                endif
               endif
             endif
             
@@ -1793,6 +1798,10 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, CS, G, 
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: dudx_u, dudy_u, dvdx_u, dvdy_u !< u vel
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: dudx_v, dudy_v, dvdx_v, dvdy_v !< v vel
 
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)+1) :: Sfn_ann_x_no_lim ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)+1) :: Sfn_ann_y_no_lim ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+
+
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
 
   ! these loops below are slightly adhoc. In principle we might
@@ -1852,8 +1861,8 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, CS, G, 
         endif
 
         call ann(x,y, ANN_CSp)
-        
-        Sfn_ann_x(i,j,k) = CS%ANN_const * y(1) 
+        Sfn_ann_x_no_lim(i,j,k) =  y(1) * G%mask2dCu(I,j)
+        Sfn_ann_x(i,j,k) = CS%ANN_const * y(1) * G%mask2dCu(I,j)
         !Sfn_ann_y(i,j,k) = y(2)
 
       enddo
@@ -1898,7 +1907,8 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, CS, G, 
         call ann(x,y, ANN_CSp)
         
         !Sfn_ann_x(i,j,k) = y(1)
-        Sfn_ann_y(i,j,k) = CS%ANN_const * y(2) 
+        Sfn_ann_y_no_lim(i,j,k) =  y(2) * G%mask2dCv(i,J)
+        Sfn_ann_y(i,j,k) = CS%ANN_const * y(2) * G%mask2dCv(i,J)
 
       enddo
     enddo
@@ -1911,8 +1921,8 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, CS, G, 
   if (CS%id_slope_yv > 0) call post_data(CS%id_slope_yv, CS%diagSlopeYv, CS%diag)
 
   ! post streamfunctions 
-  if (CS%id_Sfn_ann_x > 0) call post_data(CS%id_Sfn_ann_x, Sfn_ann_x, CS%diag)
-  if (CS%id_Sfn_ann_y > 0) call post_data(CS%id_Sfn_ann_y, Sfn_ann_y, CS%diag)
+  if (CS%id_Sfn_ann_x > 0) call post_data(CS%id_Sfn_ann_x, Sfn_ann_x_no_lim, CS%diag)
+  if (CS%id_Sfn_ann_y > 0) call post_data(CS%id_Sfn_ann_y, Sfn_ann_y_no_lim, CS%diag)
 
   ! write the velocity gradients (what is used is actually the vertical averages)
   if (CS%id_ux_u > 0) call post_data(CS%id_ux_u, dudx_u, CS%diag)
@@ -1967,18 +1977,18 @@ subroutine vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, du
 
     ! u gradients
     do j=js,je ; do I=is-1,ie
-      dudx_u(i,j,k) = 0.5*(dudx(i+1,j) + dudx(i,j))
-      dudy_u(i,j,k) = 0.5*(dudy(i,j) + dudy(i,j-1))
-      dvdx_u(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i,j-1))
-      dvdy_u(i,j,k) = 0.5*(dvdy(i+1,j) + dvdy(i,j))
+      dudx_u(i,j,k) = 0.5*(dudx(i+1,j) + dudx(i,j)) * G%mask2dCu(I,j)
+      dudy_u(i,j,k) = 0.5*(dudy(i,j) + dudy(i,j-1)) * G%mask2dCu(I,j)
+      dvdx_u(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i,j-1)) * G%mask2dCu(I,j)
+      dvdy_u(i,j,k) = 0.5*(dvdy(i+1,j) + dvdy(i,j)) * G%mask2dCu(I,j)
     enddo; enddo
 
     ! v gradients
     do j=js-1,je ; do I=is,ie
-      dvdx_v(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i-1,j))
-      dvdy_v(i,j,k) = 0.5*(dvdy(i,j+1) + dvdy(i,j))
-      dudx_v(i,j,k) = 0.5*(dudx(i,j+1) + dudx(i,j))
-      dudy_v(i,j,k) = 0.5*(dudy(i,j) + dudy(i-1,j))
+      dvdx_v(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i-1,j)) * G%mask2dCv(I,j)
+      dvdy_v(i,j,k) = 0.5*(dvdy(i,j+1) + dvdy(i,j)) * G%mask2dCv(I,j)
+      dudx_v(i,j,k) = 0.5*(dudx(i,j+1) + dudx(i,j)) * G%mask2dCv(I,j)
+      dudy_v(i,j,k) = 0.5*(dudy(i,j) + dudy(i-1,j)) * G%mask2dCv(I,j)
     enddo; enddo
 
   enddo
@@ -2545,6 +2555,9 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   call get_param(param_file, mdl, "ANN_USE_clip", CS%ANN_USE_clip, &
                  "If true, gradients are clipped to be smaller than this value", &
                  default=.false.)
+  call get_param(param_file, mdl, "USE_UPSLOPE_LIM", CS%USE_UPSLOPE_LIM, &
+                 "If true, upslope fluxes are limited", &
+                 default=.false.)            
 
   !!
   call get_param(param_file, mdl, "USE_KHTH_TENSOR", CS%USE_KHTH_TENSOR, &
