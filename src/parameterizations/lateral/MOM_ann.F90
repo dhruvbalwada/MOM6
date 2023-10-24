@@ -66,14 +66,14 @@ subroutine ann_init(CS, use_ANN, param_file)
     call log_version(param_file, mdl, version, "")
 
     call get_param(param_file, mdl, "USE_ANN", use_ANN, &
-                   "If true, turns on the ANN", default=.false.)
+                   "If true, turns on the ANN", default=.true.)
     if (.not. use_ANN) return
 
     ! Read in number of layers and their sizes
     call get_param(param_file, mdl, "ANN_num_layers", CS%num_layers, &
                    "Number of ANN layers", default=4)
     call get_param(param_file, mdl, "ANN_PARAMS_FILE", CS%NNfile, &
-                   "ANN parameters netcdf input", default="not_specified")
+                   "ANN parameters netcdf input", default="ann_params_50km.nc")
 
     ! Read size of layers
     allocate(CS%layer_sizes(CS%num_layers))

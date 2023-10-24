@@ -1300,7 +1300,7 @@ subroutine VarMix_init(Time, G, GV, US, param_file, diag, CS)
                  default=.false.)
   call get_param(param_file, mdl, "KHTH_SLOPE_CFF", KhTh_Slope_Cff, &
                  "The nondimensional coefficient in the Visbeck formula "//&
-                 "for the interface depth diffusivity", units="nondim", default=0.0)
+                 "for the interface depth diffusivity", units="nondim", default=1.0)
   call get_param(param_file, mdl, "KHTR_SLOPE_CFF", KhTr_Slope_Cff, &
                  "The nondimensional coefficient in the Visbeck formula "//&
                  "for the epipycnal tracer diffusivity", units="nondim", default=0.0)
@@ -1308,7 +1308,7 @@ subroutine VarMix_init(Time, G, GV, US, param_file, diag, CS)
                  "If true, the isopycnal slopes are calculated once and "//&
                  "stored for re-use. This uses more memory but avoids calling "//&
                  "the equation of state more times than should be necessary.", &
-                 default=.false.)
+                 default=.true.)
   call get_param(param_file, mdl, "VERY_SMALL_FREQUENCY", absurdly_small_freq, &
                  "A miniscule frequency that is used to avoid division by 0.  The default "//&
                  "value is roughly (pi / (the age of the universe)).", &
