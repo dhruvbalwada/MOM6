@@ -1781,8 +1781,8 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, CS, G, 
   type(ocean_grid_type),                        intent(in)  :: G     !< Ocean grid structure
   type(verticalGrid_type),                      intent(in)  :: GV    !< Vertical grid structure
   type(ann_cs),                                 intent(in)  :: ANN_CSp
-  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)+1), intent(out) :: Sfn_ann_x ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
-  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)+1), intent(out) :: Sfn_ann_y ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)+1), intent(inout) :: Sfn_ann_x ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)+1), intent(inout) :: Sfn_ann_y ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1),  intent(in)  :: slope_x !< Isopyc. slope at u [Z L-1 ~> nondim]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1),  intent(in)  :: slope_y !< Isopyc. slope at v [Z L-1 ~> nondim]
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),  intent(in)  :: u !< u vel
@@ -1790,19 +1790,22 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, CS, G, 
   type(thickness_diffuse_CS), intent(inout) :: CS !< Control structure for thickness_diffuse
 
 ! local variables 
-  integer i, j, k, is, ie, js, je, nz
+  integer i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
 
   real, dimension(6) :: x
   real, dimension(2) :: y
 
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: dudx_u, dudy_u, dvdx_u, dvdy_u !< u vel
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: dudx_v, dudy_v, dvdx_v, dvdy_v !< v vel
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudx, dudy, dvdx, dvdy !< u vel
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: Sfn_ann_x_C, Sfn_ann_y_C
+  !real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: dudx_u, dudy_u, dvdx_u, dvdy_u !< u vel
+  !real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: dudx_v, dudy_v, dvdx_v, dvdy_v !< v vel
 
   real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)+1) :: Sfn_ann_x_no_lim ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
   real, dimension(SZI_(G), SZJB_(G), SZK_(GV)+1) :: Sfn_ann_y_no_lim ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
 
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
+  Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
 
   ! these loops below are slightly adhoc. In principle we might
   ! not be wanting to run twice. 
@@ -1821,139 +1824,181 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, CS, G, 
   !call ann(x, y, ANN_CSp)
   !write(*,*) "x", x, "y", y
 
-  call vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
-  
+  !call vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
+  call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy)
+
+  ! Stream function on center points 
+  do i = is-1,ie+1
+    do j = js-1,je+1
+      do k = 2, nz
+        x(1) = 0.5*(dudx(i,j,k-1) + dudx(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
+        x(2) = 0.5*(dudy(i,j,k-1) + dudy(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
+        x(3) = 0.5*(dvdx(i,j,k-1) + dvdx(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
+        x(4) = 0.5*(dvdy(i,j,k-1) + dvdy(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
+
+        x(5) = - 0.5*(slope_x(I,j,k) + slope_x(I-1,j,k)) * G%mask2dT(i,j)
+        x(6) = - 0.5*(slope_y(i,J,k) + slope_y(i,J-1,k)) * G%mask2dT(i,j)
+        
+        call ann(x,y, ANN_CSp)
+
+        Sfn_ann_x_C(i,j,k) =  y(1) * G%mask2dT(I,j)
+        Sfn_ann_y_C(i,j,k) =  y(2) * G%mask2dT(I,j)
+
+        enddo
+      enddo
+    enddo
+
+    ! Interpolate Stream functions out to u points
+    do I = Isq, Ieq
+      do j = js, je
+        do k = 2, nz
+          Sfn_ann_x_no_lim(I,j,k) = 0.5 * ( Sfn_ann_x_C(i,j,k) + Sfn_ann_x_C(i+1,j,k) ) * G%mask2dCu(I,j)
+          Sfn_ann_x(I,j,k) =  CS%ANN_const * Sfn_ann_x_no_lim(I,j,k)
+        enddo
+      enddo
+    enddo
+    
+    ! Interpolate Stream functions out to v points 
+    do i = is, ie
+      do J = Jsq, Jeq
+        do k = 2, nz
+          Sfn_ann_y_no_lim(i,J,k) = 0.5* ( Sfn_ann_y_C(i,j,k) + Sfn_ann_y_C(i,j+1,k) ) * G%mask2dCv(i,J)
+          Sfn_ann_y(i,J,k) = CS%ANN_const * Sfn_ann_y_no_lim(i,J,k)
+        enddo
+      enddo
+    enddo
+
 
  !  stream function on u points
-  do i = is-1, ie
-    do j = js, je
-      do k = 2, nz ! not setting values at the surface and bottom.
+  ! do i = is-1, ie
+  !   do j = js, je
+  !     do k = 2, nz ! not setting values at the surface and bottom.
         
-        ! Input order u_x, u_y, v_x, v_y
-        x(1) = 0.5*(dudx_u(i,j,k-1) + dudx_u(i,j,k))* CS%ANN_grad_supp
-        x(2) = 0.5*(dudy_u(i,j,k-1) + dudy_u(i,j,k))* CS%ANN_grad_supp
-        x(3) = 0.5*(dvdx_u(i,j,k-1) + dvdx_u(i,j,k))* CS%ANN_grad_supp
-        x(4) = 0.5*(dvdy_u(i,j,k-1) + dvdy_u(i,j,k))* CS%ANN_grad_supp
+  !       ! Input order u_x, u_y, v_x, v_y
+  !       x(1) = 0.5*(dudx_u(i,j,k-1) + dudx_u(i,j,k))* CS%ANN_grad_supp
+  !       x(2) = 0.5*(dudy_u(i,j,k-1) + dudy_u(i,j,k))* CS%ANN_grad_supp
+  !       x(3) = 0.5*(dvdx_u(i,j,k-1) + dvdx_u(i,j,k))* CS%ANN_grad_supp
+  !       x(4) = 0.5*(dvdy_u(i,j,k-1) + dvdy_u(i,j,k))* CS%ANN_grad_supp
         
-        !x(5) = slope_x(i,j,k) 
-        !x(6) = slope_x(i,j,k) 
-        x(5) = - slope_x(I,j,k) * G%mask2dCu(I,j)  ! ugh we need a minus sign for the slope here because without EOS the sign of slope in MOM6 is wrong.
-        x(6) = - 0.25*(slope_y(I,j,k) * G%mask2dCv(I,j)  + &
-                     slope_y(I,j-1,k) * G%mask2dCv(I,j-1)  + &
-                     slope_y(I+1,j,k)* G%mask2dCv(I+1,j)  + &
-                     slope_y(I+1, j-1, k)* G%mask2dCv(I+1,j-1)  ) *  &
-                     G%mask2dCu(I,j) 
+  !       !x(5) = slope_x(i,j,k) 
+  !       !x(6) = slope_x(i,j,k) 
+  !       x(5) = - slope_x(I,j,k) * G%mask2dCu(I,j)  ! ugh we need a minus sign for the slope here because without EOS the sign of slope in MOM6 is wrong.
+  !       x(6) = - 0.25*(slope_y(I,j,k) * G%mask2dCv(I,j)  + &
+  !                    slope_y(I,j-1,k) * G%mask2dCv(I,j-1)  + &
+  !                    slope_y(I+1,j,k)* G%mask2dCv(I+1,j)  + &
+  !                    slope_y(I+1, j-1, k)* G%mask2dCv(I+1,j-1)  ) *  &
+  !                    G%mask2dCu(I,j) 
 
-        ! Start writing diagnostics for debugging 
-        if (CS%id_slope_xu > 0) CS%diagSlopeXu(I,j,k) = x(5)
-        if (CS%id_slope_yu > 0) CS%diagSlopeYu(I,j,k) = x(6)            
+  !       ! Start writing diagnostics for debugging 
+  !       if (CS%id_slope_xu > 0) CS%diagSlopeXu(I,j,k) = x(5)
+  !       if (CS%id_slope_yu > 0) CS%diagSlopeYu(I,j,k) = x(6)            
         
         
-        if (CS%ANN_USE_clip) then
-          ! Clip grads
-          if (abs(x(1)) > CS%ANN_grad_clip) x(1) = sign(CS%ANN_grad_clip, x(1))
-          if (abs(x(2)) > CS%ANN_grad_clip) x(2) = sign(CS%ANN_grad_clip, x(2))
-          if (abs(x(3)) > CS%ANN_grad_clip) x(3) = sign(CS%ANN_grad_clip, x(3))
-          if (abs(x(4)) > CS%ANN_grad_clip) x(4) = sign(CS%ANN_grad_clip, x(4))
-          ! Clip slopes
-          if (abs(x(5)) > CS%ANN_slope_clip) x(5) = sign(CS%ANN_slope_clip, x(5))
-          if (abs(x(6)) > CS%ANN_slope_clip) x(6) = sign(CS%ANN_slope_clip, x(6))
-        endif
+  !       if (CS%ANN_USE_clip) then
+  !         ! Clip grads
+  !         if (abs(x(1)) > CS%ANN_grad_clip) x(1) = sign(CS%ANN_grad_clip, x(1))
+  !         if (abs(x(2)) > CS%ANN_grad_clip) x(2) = sign(CS%ANN_grad_clip, x(2))
+  !         if (abs(x(3)) > CS%ANN_grad_clip) x(3) = sign(CS%ANN_grad_clip, x(3))
+  !         if (abs(x(4)) > CS%ANN_grad_clip) x(4) = sign(CS%ANN_grad_clip, x(4))
+  !         ! Clip slopes
+  !         if (abs(x(5)) > CS%ANN_slope_clip) x(5) = sign(CS%ANN_slope_clip, x(5))
+  !         if (abs(x(6)) > CS%ANN_slope_clip) x(6) = sign(CS%ANN_slope_clip, x(6))
+  !       endif
 
-        call ann(x,y, ANN_CSp)
-        Sfn_ann_x_no_lim(i,j,k) =  y(1) * G%mask2dCu(I,j)
-        Sfn_ann_x(i,j,k) = CS%ANN_const * y(1) * G%mask2dCu(I,j)
-        !Sfn_ann_y(i,j,k) = y(2)
+  !       call ann(x,y, ANN_CSp)
+  !       Sfn_ann_x_no_lim(i,j,k) =  y(1) * G%mask2dCu(I,j)
+  !       Sfn_ann_x(i,j,k) = CS%ANN_const * y(1) * G%mask2dCu(I,j)
+  !       !Sfn_ann_y(i,j,k) = y(2)
 
-      enddo
-    enddo
-  enddo
+  !     enddo
+  !   enddo
+  ! enddo
 
   !  stream function on v points
-  do i = is, ie
-    do j = js-1, je
-      do k = 2, nz ! not setting values at the surface and bottom.
+  ! do i = is, ie
+  !   do j = js-1, je
+  !     do k = 2, nz ! not setting values at the surface and bottom.
         
-        x(1) = 0.5*(dudx_v(i,j,k-1) + dudx_v(i,j,k))* CS%ANN_grad_supp
-        x(2) = 0.5*(dudy_v(i,j,k-1) + dudy_v(i,j,k))* CS%ANN_grad_supp
-        x(3) = 0.5*(dvdx_v(i,j,k-1) + dvdx_v(i,j,k))* CS%ANN_grad_supp
-        x(4) = 0.5*(dvdy_v(i,j,k-1) + dvdy_v(i,j,k))* CS%ANN_grad_supp
+  !       x(1) = 0.5*(dudx_v(i,j,k-1) + dudx_v(i,j,k))* CS%ANN_grad_supp
+  !       x(2) = 0.5*(dudy_v(i,j,k-1) + dudy_v(i,j,k))* CS%ANN_grad_supp
+  !       x(3) = 0.5*(dvdx_v(i,j,k-1) + dvdx_v(i,j,k))* CS%ANN_grad_supp
+  !       x(4) = 0.5*(dvdy_v(i,j,k-1) + dvdy_v(i,j,k))* CS%ANN_grad_supp
         
-        !x(5) = slope_y(i,j,k)
-        !x(6) = slope_y(i,j,k)
-        x(5) = - 0.25*(slope_x(i,J,k) * G%mask2dCu(i,J) + &
-                               slope_x(i-1,J,k) * G%mask2dCu(i-1,J)  + &
-                               slope_x(i,J+1,k) * G%mask2dCu(i,J+1) + &
-                               slope_x(i-1,J+1,k)* G%mask2dCu(i-1,J+1)  ) * &
-                               G%mask2dCv(i,J) 
-        x(6) = - slope_y(i,J,k) * G%mask2dCv(i,J)
+  !       !x(5) = slope_y(i,j,k)
+  !       !x(6) = slope_y(i,j,k)
+  !       x(5) = - 0.25*(slope_x(i,J,k) * G%mask2dCu(i,J) + &
+  !                              slope_x(i-1,J,k) * G%mask2dCu(i-1,J)  + &
+  !                              slope_x(i,J+1,k) * G%mask2dCu(i,J+1) + &
+  !                              slope_x(i-1,J+1,k)* G%mask2dCu(i-1,J+1)  ) * &
+  !                              G%mask2dCv(i,J) 
+  !       x(6) = - slope_y(i,J,k) * G%mask2dCv(i,J)
 
-        ! Start writing diagnostics for debugging 
+  !       ! Start writing diagnostics for debugging 
 
-        if (CS%id_slope_xv > 0) CS%diagSlopeXv(I,j,k) = x(5)
-        if (CS%id_slope_yv > 0) CS%diagSlopeYv(I,j,k) = x(6) 
+  !       if (CS%id_slope_xv > 0) CS%diagSlopeXv(I,j,k) = x(5)
+  !       if (CS%id_slope_yv > 0) CS%diagSlopeYv(I,j,k) = x(6) 
 
-        if (CS%ANN_USE_clip) then
-          ! Clip grads
-          if (abs(x(1)) > CS%ANN_grad_clip) x(1) = sign(CS%ANN_grad_clip, x(1))
-          if (abs(x(2)) > CS%ANN_grad_clip) x(2) = sign(CS%ANN_grad_clip, x(2))
-          if (abs(x(3)) > CS%ANN_grad_clip) x(3) = sign(CS%ANN_grad_clip, x(3))
-          if (abs(x(4)) > CS%ANN_grad_clip) x(4) = sign(CS%ANN_grad_clip, x(4))
-          ! Clip slopes
-          if (abs(x(5)) > CS%ANN_slope_clip) x(5) = sign(CS%ANN_slope_clip, x(5))
-          if (abs(x(6)) > CS%ANN_slope_clip) x(6) = sign(CS%ANN_slope_clip, x(6))
-        endif
+  !       if (CS%ANN_USE_clip) then
+  !         ! Clip grads
+  !         if (abs(x(1)) > CS%ANN_grad_clip) x(1) = sign(CS%ANN_grad_clip, x(1))
+  !         if (abs(x(2)) > CS%ANN_grad_clip) x(2) = sign(CS%ANN_grad_clip, x(2))
+  !         if (abs(x(3)) > CS%ANN_grad_clip) x(3) = sign(CS%ANN_grad_clip, x(3))
+  !         if (abs(x(4)) > CS%ANN_grad_clip) x(4) = sign(CS%ANN_grad_clip, x(4))
+  !         ! Clip slopes
+  !         if (abs(x(5)) > CS%ANN_slope_clip) x(5) = sign(CS%ANN_slope_clip, x(5))
+  !         if (abs(x(6)) > CS%ANN_slope_clip) x(6) = sign(CS%ANN_slope_clip, x(6))
+  !       endif
         
-        call ann(x,y, ANN_CSp)
+  !       call ann(x,y, ANN_CSp)
         
-        !Sfn_ann_x(i,j,k) = y(1)
-        Sfn_ann_y_no_lim(i,j,k) =  y(2) * G%mask2dCv(i,J)
-        Sfn_ann_y(i,j,k) = CS%ANN_const * y(2) * G%mask2dCv(i,J)
+  !       !Sfn_ann_x(i,j,k) = y(1)
+  !       Sfn_ann_y_no_lim(i,j,k) =  y(2) * G%mask2dCv(i,J)
+  !       Sfn_ann_y(i,j,k) = CS%ANN_const * y(2) * G%mask2dCv(i,J)
 
-      enddo
-    enddo
-  enddo
+  !     enddo
+  !   enddo
+  ! enddo
 
   ! post slopes
-  if (CS%id_slope_xu > 0) call post_data(CS%id_slope_xu, CS%diagSlopeXu, CS%diag)
-  if (CS%id_slope_xv > 0) call post_data(CS%id_slope_xv, CS%diagSlopeXv, CS%diag)
-  if (CS%id_slope_yu > 0) call post_data(CS%id_slope_yu, CS%diagSlopeYu, CS%diag)
-  if (CS%id_slope_yv > 0) call post_data(CS%id_slope_yv, CS%diagSlopeYv, CS%diag)
+  !if (CS%id_slope_xu > 0) call post_data(CS%id_slope_xu, CS%diagSlopeXu, CS%diag)
+  !if (CS%id_slope_xv > 0) call post_data(CS%id_slope_xv, CS%diagSlopeXv, CS%diag)
+  !if (CS%id_slope_yu > 0) call post_data(CS%id_slope_yu, CS%diagSlopeYu, CS%diag)
+  !if (CS%id_slope_yv > 0) call post_data(CS%id_slope_yv, CS%diagSlopeYv, CS%diag)
 
   ! post streamfunctions 
   if (CS%id_Sfn_ann_x > 0) call post_data(CS%id_Sfn_ann_x, Sfn_ann_x_no_lim, CS%diag)
   if (CS%id_Sfn_ann_y > 0) call post_data(CS%id_Sfn_ann_y, Sfn_ann_y_no_lim, CS%diag)
 
   ! write the velocity gradients (what is used is actually the vertical averages)
-  if (CS%id_ux_u > 0) call post_data(CS%id_ux_u, dudx_u, CS%diag)
-  if (CS%id_uy_u > 0) call post_data(CS%id_uy_u, dudy_u, CS%diag)
-  if (CS%id_vx_u > 0) call post_data(CS%id_vx_u, dvdx_u, CS%diag)
-  if (CS%id_vy_u > 0) call post_data(CS%id_vy_u, dvdy_u, CS%diag)
+  
+  !if (CS%id_ux_u > 0) call post_data(CS%id_ux_u, dudx_u, CS%diag)
+  !if (CS%id_uy_u > 0) call post_data(CS%id_uy_u, dudy_u, CS%diag)
+  !if (CS%id_vx_u > 0) call post_data(CS%id_vx_u, dvdx_u, CS%diag)
+  !if (CS%id_vy_u > 0) call post_data(CS%id_vy_u, dvdy_u, CS%diag)
 
-  if (CS%id_ux_v > 0) call post_data(CS%id_ux_v, dudx_v, CS%diag)
-  if (CS%id_uy_v > 0) call post_data(CS%id_uy_v, dudy_v, CS%diag)
-  if (CS%id_vx_v > 0) call post_data(CS%id_vx_v, dvdx_v, CS%diag)
-  if (CS%id_vy_v > 0) call post_data(CS%id_vy_v, dvdy_v, CS%diag)
+  ! if (CS%id_ux_v > 0) call post_data(CS%id_ux_v, dudx_v, CS%diag)
+  ! if (CS%id_uy_v > 0) call post_data(CS%id_uy_v, dudy_v, CS%diag)
+  ! if (CS%id_vx_v > 0) call post_data(CS%id_vx_v, dvdx_v, CS%diag)
+  ! if (CS%id_vy_v > 0) call post_data(CS%id_vy_v, dvdy_v, CS%diag)
   ! these are not exactly the inputs, but that can be adjusted.
 
 
 end subroutine streamfn_ann
 
 ! Computes velocity gradients at u and v points
-subroutine vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
+!subroutine vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
+subroutine vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy)
   type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
   type(verticalGrid_type),                   intent(in)    :: GV  !< The ocean's vertical grid structure.
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(in)    :: u   !< The zonal velocity [L T-1 ~> m s-1].
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(in)    :: v   !< The meridional velocity [L T-1 ~> m s-1].
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(out)   :: dudx_u, dudy_u, dvdx_u, dvdy_u   !< Velocity gradients at u point
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(out)   :: dudx_v, dudy_v, dvdx_v, dvdy_v
+  !real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(out)   :: dudx_u, dudy_u, dvdx_u, dvdy_u   !< Velocity gradients at u point
+  !real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(out)   :: dudx_v, dudy_v, dvdx_v, dvdy_v
 
   ! Center points 
-  real, dimension(SZI_(G),SZJ_(G)) :: &
-    dudx, dvdy   !
+  real, dimension(SZI_(G),SZJ_(G)), intent(out) :: dudx, dvdy, dudy, dvdx   !
   ! Corner points
-  real, dimension(SZIB_(G), SZJB_(G)) :: &
-    dudy, dvdx   
+  real, dimension(SZIB_(G), SZJB_(G)) :: dudy_q, dvdx_q   
   integer :: is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
   integer :: i, j, k, n
   
@@ -1964,32 +2009,38 @@ subroutine vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, du
   do k=1, nz
     ! Copy code from MOM_hor_visc.F90
     ! Calculate velocity gradients at center points
-    do j=Jsq-1,Jeq+2 ; do i=Isq-1,Ieq+2
-      dudx(i,j) = G%IdxT(i,j)*(u(I,j,k)   - u(I-1,j,k)  ) * G%mask2dT(I,j)
-      dvdy(i,j) = G%IdyT(i,j)*(v(i,J,k)   - v(i,J-1,k)  ) * G%mask2dT(I,j)
+    do j=js-2,je+2 ; do i=is-2,ie+2 ! has halo 2
+      dudx(i,j) = G%IdxT(i,j)* (u(I,j,k)   - u(I-1,j,k)) * G%mask2dT(i,j)
+      dvdy(i,j) = G%IdyT(i,j)* (v(i,J,k)   - v(i,J-1,k)) * G%mask2dT(i,j)
     enddo ; enddo
 
     ! Calculate velocity gradients at corner points
-    do J=Jsq-2,Jeq+2 ; do I=Isq-2,Ieq+2
-      dvdx(I,J) = G%IdxBu(I,J)*(v(i+1,J,k)  - v(i,J,k) ) * G%mask2dBu(I,j)
-      dudy(I,J) = G%IdyBu(I,J)*(u(I,j+1,k)  - u(I,j,k) ) * G%mask2dBu(I,j)
+    do J=Jsq-1,Jeq+1 ; do I=Isq-1,Ieq+1
+      dvdx_q(I,J) = G%IdxBu(I,J)*(v(i+1,J,k)  - v(i,J,k) ) * G%mask2dBu(I,J)
+      dudy_q(I,J) = G%IdyBu(I,J)*(u(I,j+1,k)  - u(I,j,k) ) * G%mask2dBu(I,J)
     enddo ; enddo
 
+    ! interpolate corner grads to center points 
+    do j = js-1, je+1; do i = is-1, ie+1
+       dvdx(i,j) =  0.25 * (dvdx_q(I,J) + dvdx_q(I-1,J) + dvdx_q(I,J-1) + dvdx_q(I-1,J-1)) * G%mask2dT(i,j) 
+       dudy(i,j) =  0.25 * (dudy_q(I,J) + dudy_q(I-1,J) + dudy_q(I,J-1) + dudy_q(I-1,J-1)) * G%mask2dT(i,j) 
+    enddo; enddo 
+
     ! u gradients
-    do j=js,je ; do I=is-1,ie
-      dudx_u(i,j,k) = 0.5*(dudx(i+1,j) + dudx(i,j)) * G%mask2dCu(I,j)
-      dudy_u(i,j,k) = 0.5*(dudy(i,j) + dudy(i,j-1)) * G%mask2dCu(I,j)
-      dvdx_u(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i,j-1)) * G%mask2dCu(I,j)
-      dvdy_u(i,j,k) = 0.5*(dvdy(i+1,j) + dvdy(i,j)) * G%mask2dCu(I,j)
-    enddo; enddo
+    !do j=js,je ; do I=is-1,ie
+    !  dudx_u(i,j,k) = 0.5*(dudx(i+1,j) + dudx(i,j)) * G%mask2dCu(I,j)
+    !  dudy_u(i,j,k) = 0.5*(dudy(i,j) + dudy(i,j-1)) * G%mask2dCu(I,j)
+    !  dvdx_u(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i,j-1)) * G%mask2dCu(I,j)
+    !  dvdy_u(i,j,k) = 0.5*(dvdy(i+1,j) + dvdy(i,j)) * G%mask2dCu(I,j)
+    !enddo; enddo
 
     ! v gradients
-    do j=js-1,je ; do I=is,ie
-      dvdx_v(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i-1,j)) * G%mask2dCv(I,j)
-      dvdy_v(i,j,k) = 0.5*(dvdy(i,j+1) + dvdy(i,j)) * G%mask2dCv(I,j)
-      dudx_v(i,j,k) = 0.5*(dudx(i,j+1) + dudx(i,j)) * G%mask2dCv(I,j)
-      dudy_v(i,j,k) = 0.5*(dudy(i,j) + dudy(i-1,j)) * G%mask2dCv(I,j)
-    enddo; enddo
+    !do j=js-1,je ; do I=is,ie
+    !  dvdx_v(i,j,k) = 0.5*(dvdx(i,j) + dvdx(i-1,j)) * G%mask2dCv(I,j)
+    !  dvdy_v(i,j,k) = 0.5*(dvdy(i,j+1) + dvdy(i,j)) * G%mask2dCv(I,j)
+    !  dudx_v(i,j,k) = 0.5*(dudx(i,j+1) + dudx(i,j)) * G%mask2dCv(I,j)
+    !  dudy_v(i,j,k) = 0.5*(dudy(i,j) + dudy(i-1,j)) * G%mask2dCv(I,j)
+    !enddo; enddo
 
   enddo
 

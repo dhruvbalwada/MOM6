@@ -11,6 +11,7 @@ use MOM_verticalGrid,  only : verticalGrid_type
 use MOM_EOS,           only : calculate_density_derivs, calculate_density_second_derivs, EOS_domain
 use MOM_open_boundary, only : ocean_OBC_type, OBC_NONE
 use MOM_open_boundary, only : OBC_DIRECTION_E, OBC_DIRECTION_W, OBC_DIRECTION_N, OBC_DIRECTION_S
+use MOM_domains,       only : pass_vector
 
 implicit none ; private
 
@@ -483,6 +484,8 @@ subroutine calc_isoneutral_slopes(G, GV, US, h, e, tv, dt_kappa_smooth, use_stan
 
     enddo ! i
   enddo ; enddo ! end of j-loop
+
+  !call pass_vector(slope_x, slope_y, G%Domain)
 
 end subroutine calc_isoneutral_slopes
 
