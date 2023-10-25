@@ -1799,7 +1799,7 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e)
   integer i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
 
   real, dimension(6) :: x
-  real, dimension(2) :: y
+  real, dimension(2) :: y, y_zeros
 
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudx, dudy, dvdx, dvdy !< u vel
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: Sfn_ann_x_C, Sfn_ann_y_C
@@ -1840,6 +1840,11 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e)
   !call ann(x, y, ANN_CSp)
   !write(*,*) "x", x, "y", y
 
+  ! zero grads 
+  x = 0.0
+  call ann(x, y_zeros, ANN_CSp)
+
+
   !call vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
   call slope_calc(e, G, GV, slope_x, slope_y)
   call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy)
@@ -1858,8 +1863,8 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e)
         
         call ann(x,y, ANN_CSp)
 
-        Sfn_ann_x_C(i,j,k) =  y(1) * G%mask2dT(I,j)
-        Sfn_ann_y_C(i,j,k) =  y(2) * G%mask2dT(I,j)
+        Sfn_ann_x_C(i,j,k) =  ( y(1) - y_zeros(1) ) * G%mask2dT(I,j)
+        Sfn_ann_y_C(i,j,k) =  ( y(2) - y_zeros(2) ) * G%mask2dT(I,j)
 
         enddo
       enddo

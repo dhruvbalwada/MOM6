@@ -173,6 +173,10 @@ subroutine ann(x, y, CS)
         y(i) = y(i) * CS%output_norms(i)
     enddo
 
+    ! Hacky zero bias 
+    ! 50km filter 
+    !y(1) = y(1) - 0.00133592
+    !y(2) = y(2) - (-0.03502557)
 
 
 
