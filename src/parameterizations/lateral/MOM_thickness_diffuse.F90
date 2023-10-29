@@ -586,7 +586,7 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, &
       !call streamfn_ann(CS%Sfn_ann_x, CS%Sfn_ann_y, VarMix%slope_x, VarMix%slope_y, ANN_CSp, &
       !                  CS, G, GV, u, v, e)
       call streamfn_ann(CS%Sfn_ann_x, CS%Sfn_ann_y, ANN_CSp, &
-                        CS, G, GV, u, v, e)
+                        CS, G, GV, u, v, e, h)
       call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                   int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
                                   Sfn_ann_x=CS%Sfn_ann_x, Sfn_ann_y=CS%Sfn_ann_y)
@@ -1782,7 +1782,7 @@ end subroutine thickness_mask_3D
 !! Returns psi_ann, which is summed in thickness_diffuse_full with the psi = -KS
 !! Called by thickness diffuse()
 !subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, slope_x, slope_y, ANN_CSp, CS, G, GV, u, v, e)
-subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e)
+subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
   type(ocean_grid_type),                        intent(in)  :: G     !< Ocean grid structure
   type(verticalGrid_type),                      intent(in)  :: GV    !< Vertical grid structure
   type(ann_cs),                                 intent(in)  :: ANN_CSp
@@ -1792,7 +1792,8 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e)
   !real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1),  intent(in)  :: slope_y !< Isopyc. slope at v [Z L-1 ~> nondim]
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),  intent(in)  :: u !< u vel
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),  intent(in)  :: v !< v vel
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(in)    :: e !< interface
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), intent(in)  :: e !< interface
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(in)    :: h !< thickness
   type(thickness_diffuse_CS), intent(inout) :: CS !< Control structure for thickness_diffuse
 
 ! local variables 
@@ -1853,10 +1854,17 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e)
   do i = is-1,ie+1
     do j = js-1,je+1
       do k = 2, nz
-        x(1) = 0.5*(dudx(i,j,k-1) + dudx(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
-        x(2) = 0.5*(dudy(i,j,k-1) + dudy(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
-        x(3) = 0.5*(dvdx(i,j,k-1) + dvdx(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
-        x(4) = 0.5*(dvdy(i,j,k-1) + dvdy(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
+
+        ! Thickness weighted mean
+        x(1) = ( dudx(i,j,k-1) * h(i,j,k-1)  + dudx(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
+        x(2) = ( dudy(i,j,k-1) * h(i,j,k-1)  + dudy(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
+        x(3) = ( dvdx(i,j,k-1) * h(i,j,k-1)  + dvdx(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
+        x(4) = ( dvdy(i,j,k-1) * h(i,j,k-1)  + dvdy(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
+
+        ! x(1) = 0.5*(dudx(i,j,k-1) + dudx(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
+        ! x(2) = 0.5*(dudy(i,j,k-1) + dudy(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
+        ! x(3) = 0.5*(dvdx(i,j,k-1) + dvdx(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
+        ! x(4) = 0.5*(dvdy(i,j,k-1) + dvdy(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
 
         x(5) = - 0.5*(slope_x(I,j,k) + slope_x(I-1,j,k)) * G%mask2dT(i,j)
         x(6) = - 0.5*(slope_y(i,J,k) + slope_y(i,J-1,k)) * G%mask2dT(i,j)
