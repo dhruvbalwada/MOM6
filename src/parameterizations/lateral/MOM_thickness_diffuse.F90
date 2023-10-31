@@ -56,6 +56,7 @@ type, public :: thickness_diffuse_CS ; private
   real    :: TENSOR_CFL_LIM
   logical :: USE_ANN             !< If true, thickness diffusion is done use a Stream function computed from ANN     
   logical :: ANN_USE_clip
+  logical :: ANN_remove_bias
   logical :: USE_UPSLOPE_LIM
   real    :: ANN_const           !< An amplification constant that multiplies the stream function returned from ANN.
   real    :: ANN_grad_supp
@@ -110,10 +111,14 @@ type, public :: thickness_diffuse_CS ; private
   real, allocatable :: GMwork(:,:)        !< Work by isopycnal height diffusion [R Z L2 T-3 ~> W m-2]
   real, allocatable :: diagSlopeX(:,:,:)  !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
   real, allocatable :: diagSlopeY(:,:,:)  !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
-
   ! Diagnosits to debug 
   real, allocatable :: diagSlopeXu(:,:,:), diagSlopeXv(:,:,:) !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
   real, allocatable :: diagSlopeYu(:,:,:), diagSlopeYv(:,:,:)  !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
+  real, allocatable :: diagSlopeXc(:,:,:)  !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
+  real, allocatable :: diagSlopeYc(:,:,:)  !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
+  
+  real, allocatable :: diagUXc(:,:,:), diagUYc(:,:,:), diagVXc(:,:,:), diagVYc(:,:,:) !< Diagnostics for velocity gradient tensor at C points
+
   ! Diagnostics of the vel gradients that are used as inputs
   !real, allocatable :: diag_ux_u(:,:,:), diag_uy_u(:,:,:), diag_vx_u(:,:,:), diag_vy_u(:,:,:)
   !real, allocatable :: diag_ux_v(:,:,:), diag_uy_v(:,:,:), diag_vx_v(:,:,:), diag_vy_v(:,:,:)
@@ -142,12 +147,14 @@ type, public :: thickness_diffuse_CS ; private
   ! Diagnostics to debug NGM model
   integer :: id_Kux = -1, id_Kuy = -1, id_Kvx = -1, id_Kvy = -1
   integer :: id_slope_xu = -1, id_slope_xv = -1, id_slope_yu = -1, id_slope_yv = -1
+  integer :: id_slope_xc = -1, id_slope_yc = -1
   integer :: id_sfn_unlim_x = -1, id_sfn_unlim_y = -1, id_sfn_x = -1, id_sfn_y = -1
   integer :: id_hu_mask = -1, id_hv_mask = -1
 
   ! Diagnostics to debug ANN 
   integer :: id_ux_u = -1, id_uy_u = -1, id_vx_u = -1, id_vy_u = -1 ! We can use the ids for slopes from above
   integer :: id_ux_v = -1, id_uy_v = -1, id_vx_v = -1, id_vy_v = -1
+  integer :: id_ux_c = -1, id_uy_c = -1, id_vx_c = -1, id_vy_c = -1
   integer :: id_Sfn_ann_x = -1, id_Sfn_ann_y = -1
   integer :: id_Sfn_ann_x_C = -1, id_Sfn_ann_y_C = -1
   
@@ -1841,10 +1848,9 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
   !call ann(x, y, ANN_CSp)
   !write(*,*) "x", x, "y", y
 
-  ! zero grads 
+  ! zero grads (will be used to remove bias if ANN_remove_bias=True)
   x = 0.0
   call ann(x, y_zeros, ANN_CSp)
-
 
   !call vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
   call slope_calc(e, G, GV, slope_x, slope_y)
@@ -1871,8 +1877,21 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
         
         call ann(x,y, ANN_CSp)
 
-        Sfn_ann_x_C(i,j,k) =  ( y(1) - y_zeros(1) ) * G%mask2dT(I,j)
-        Sfn_ann_y_C(i,j,k) =  ( y(2) - y_zeros(2) ) * G%mask2dT(I,j)
+        if (CS%ANN_remove_bias) then
+          Sfn_ann_x_C(i,j,k) =  ( y(1) - y_zeros(1) ) * G%mask2dT(I,j)
+          Sfn_ann_y_C(i,j,k) =  ( y(2) - y_zeros(2) ) * G%mask2dT(I,j)
+        else
+          Sfn_ann_x_C(i,j,k) =  y(1) * G%mask2dT(I,j)
+          Sfn_ann_y_C(i,j,k) =  y(2) * G%mask2dT(I,j)
+        endif
+
+        !Start writing diagnostics for debugging 
+        if (CS%id_ux_c > 0) CS%diagUXc(i,j,k) = x(1)
+        if (CS%id_uy_c > 0) CS%diagUYc(i,j,k) = x(2)
+        if (CS%id_vx_c > 0) CS%diagVXc(i,j,k) = x(3)
+        if (CS%id_vy_c > 0) CS%diagVYc(i,j,k) = x(4)
+        if (CS%id_slope_xc > 0) CS%diagSlopeXc(i,j,k) = x(5)
+        if (CS%id_slope_yc > 0) CS%diagSlopeYc(i,j,k) = x(6) 
 
         enddo
       enddo
@@ -1992,11 +2011,20 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
   !   enddo
   ! enddo
 
+
+  ! post velocity gradients
+  if (CS%id_ux_c > 0) call post_data(CS%id_ux_c, CS%diagUXc, CS%diag)
+  if (CS%id_uy_c > 0) call post_data(CS%id_uy_c, CS%diagUYc, CS%diag)
+  if (CS%id_vx_c > 0) call post_data(CS%id_vx_c, CS%diagVXc, CS%diag)
+  if (CS%id_vy_c > 0) call post_data(CS%id_vy_c, CS%diagVYc, CS%diag)
+
   ! post slopes
   !if (CS%id_slope_xu > 0) call post_data(CS%id_slope_xu, CS%diagSlopeXu, CS%diag)
   !if (CS%id_slope_xv > 0) call post_data(CS%id_slope_xv, CS%diagSlopeXv, CS%diag)
   !if (CS%id_slope_yu > 0) call post_data(CS%id_slope_yu, CS%diagSlopeYu, CS%diag)
   !if (CS%id_slope_yv > 0) call post_data(CS%id_slope_yv, CS%diagSlopeYv, CS%diag)
+  if (CS%id_slope_xc > 0) call post_data(CS%id_slope_xc, CS%diagSlopeXc, CS%diag)
+  if (CS%id_slope_yc > 0) call post_data(CS%id_slope_yc, CS%diagSlopeYc, CS%diag)
 
   ! post streamfunctions 
   if (CS%id_Sfn_ann_x > 0) call post_data(CS%id_Sfn_ann_x, Sfn_ann_x_no_lim, CS%diag)
@@ -2677,6 +2705,9 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   call get_param(param_file, mdl, "ANN_USE_clip", CS%ANN_USE_clip, &
                  "If true, gradients are clipped to be smaller than this value", &
                  default=.false.)
+  call get_param(param_file, mdl, "ANN_remove_bias", CS%ANN_remove_bias, &
+                 "If true, bias at origin for the ANN is removed", &
+                 default=.true.)            
   call get_param(param_file, mdl, "USE_UPSLOPE_LIM", CS%USE_UPSLOPE_LIM, &
                  "If true, upslope fluxes are limited", &
                  default=.false.)            
@@ -2942,6 +2973,8 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
 
 ! To debug NGM and ANN
     ! Debug slopes
+
+    ! U slopes
   CS%id_slope_xu =  register_diag_field('ocean_model', 'neutral_slope_xu', diag%axesCui, Time, &
            'Zonal slope of neutral surface at u point', 'nondim', conversion=US%Z_to_L)
   if (CS%id_slope_xu > 0) &
@@ -2952,6 +2985,7 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   if (CS%id_slope_yu > 0) &
     allocate(CS%diagSlopeYu(G%IsdB:G%IedB,G%jsd:G%jed,GV%ke+1), source=0.)
 
+    ! V slopes
   CS%id_slope_xv =  register_diag_field('ocean_model', 'neutral_slope_xv', diag%axesCvi, Time, &
            'Zonal slope of neutral surface at v point', 'nondim', conversion=US%Z_to_L)
   if (CS%id_slope_xv > 0) &
@@ -2962,6 +2996,17 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   if (CS%id_slope_yv > 0) &
     allocate(CS%diagSlopeYv(G%isd:G%ied,G%JsdB:G%JedB,GV%ke+1), source=0.)
     
+    ! C slopes (used in ANN)
+  CS%id_slope_xc =  register_diag_field('ocean_model', 'neutral_slope_xc', diag%axesTi, Time, &
+           'Zonal slope of neutral surface at C point', 'nondim', conversion=US%Z_to_L)
+  if (CS%id_slope_xc > 0) &
+    allocate(CS%diagSlopeXc(SZI_(G),SZJ_(G),SZK_(GV)+1), source=0.)
+
+  CS%id_slope_yc =  register_diag_field('ocean_model', 'neutral_slope_yc', diag%axesTi, Time, &
+           'Meridional slope of neutral surface at C point', 'nondim', conversion=US%Z_to_L)
+  if (CS%id_slope_yc > 0) &
+    allocate(CS%diagSlopeYc(SZI_(G),SZJ_(G),SZK_(GV)+1), source=0.)
+
     ! Debug diffusivities
   CS%id_Kux =  register_diag_field('ocean_model', 'KHTH_ux', diag%axesCui, Time, &
            'Parameterized mesoscale eddy advection NGM diffusivity at U-point in x-direction', &
@@ -3021,34 +3066,57 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   CS%id_Sfn_ann_y_C = register_diag_field('ocean_model', 'ANN_sfn_y_C', diag%axesTi, Time, &
             'Parameterized Meridional Overturning Streamfunction from ANN at C', &
             'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
-  
-  
-    ! The gradients generated for inputs into the model 
-  CS%id_ux_u =  register_diag_field('ocean_model', 'dudx_u', diag%axesCuL, Time, &
-            'dudx at u point', &
+
+    ! The gradients generated for inputs into the ML model 
+  CS%id_ux_c =  register_diag_field('ocean_model', 'dudx_c', diag%axesTi, Time, &
+            'dudx at c point', &
             's-1', conversion=US%s_to_T) 
-  CS%id_uy_u =  register_diag_field('ocean_model', 'dudy_u', diag%axesCuL, Time, &
-            'dudy at u point', &
+  if (CS%id_ux_c > 0) &
+      allocate(CS%diagUXc(SZI_(G),SZJ_(G),SZK_(GV)+1), source=0.)
+
+  CS%id_uy_c =  register_diag_field('ocean_model', 'dudy_c', diag%axesTi, Time, &
+            'dudy at c point', &
             's-1', conversion=US%s_to_T)  
-  CS%id_vx_u =  register_diag_field('ocean_model', 'dvdx_u', diag%axesCuL, Time, &
-            'dvdx at u point', &
+  if (CS%id_uy_c > 0) &
+      allocate(CS%diagUYc(SZI_(G),SZJ_(G),SZK_(GV)+1), source=0.)
+
+  CS%id_vx_c =  register_diag_field('ocean_model', 'dvdx_c', diag%axesTi, Time, &
+            'dvdx at c point', &
+            's-1', conversion=US%s_to_T)
+  if (CS%id_vx_c > 0) &
+      allocate(CS%diagVXc(SZI_(G),SZJ_(G),SZK_(GV)+1), source=0.)          
+
+  CS%id_vy_c =  register_diag_field('ocean_model', 'dvdy_c', diag%axesTi, Time, &
+            'dvdy at c point', &
             's-1', conversion=US%s_to_T) 
-  CS%id_vy_u =  register_diag_field('ocean_model', 'dvdy_u', diag%axesCuL, Time, &
-            'dvdy at u point', &
-            's-1', conversion=US%s_to_T) 
+  if (CS%id_vy_c > 0) &
+      allocate(CS%diagVYc(SZI_(G),SZJ_(G),SZK_(GV)+1), source=0.)
+
+  ! CS%id_ux_u =  register_diag_field('ocean_model', 'dudx_u', diag%axesCuL, Time, &
+  !           'dudx at u point', &
+  !           's-1', conversion=US%s_to_T) 
+  ! CS%id_uy_u =  register_diag_field('ocean_model', 'dudy_u', diag%axesCuL, Time, &
+  !           'dudy at u point', &
+  !           's-1', conversion=US%s_to_T)  
+  ! CS%id_vx_u =  register_diag_field('ocean_model', 'dvdx_u', diag%axesCuL, Time, &
+  !           'dvdx at u point', &
+  !           's-1', conversion=US%s_to_T) 
+  ! CS%id_vy_u =  register_diag_field('ocean_model', 'dvdy_u', diag%axesCuL, Time, &
+  !           'dvdy at u point', &
+  !           's-1', conversion=US%s_to_T) 
   
-  CS%id_ux_v =  register_diag_field('ocean_model', 'dudx_v', diag%axesCvL, Time, &
-            'dudx at v point', &
-            's-1', conversion=US%s_to_T) 
-  CS%id_uy_v =  register_diag_field('ocean_model', 'dudy_v', diag%axesCvL, Time, &
-            'dudy at v point', &
-            's-1', conversion=US%s_to_T)  
-  CS%id_vx_v =  register_diag_field('ocean_model', 'dvdx_v', diag%axesCvL, Time, &
-            'dvdx at v point', &
-            's-1', conversion=US%s_to_T) 
-  CS%id_vy_v =  register_diag_field('ocean_model', 'dvdy_v', diag%axesCvL, Time, &
-            'dvdy at v point', &
-            's-1', conversion=US%s_to_T) 
+  ! CS%id_ux_v =  register_diag_field('ocean_model', 'dudx_v', diag%axesCvL, Time, &
+  !           'dudx at v point', &
+  !           's-1', conversion=US%s_to_T) 
+  ! CS%id_uy_v =  register_diag_field('ocean_model', 'dudy_v', diag%axesCvL, Time, &
+  !           'dudy at v point', &
+  !           's-1', conversion=US%s_to_T)  
+  ! CS%id_vx_v =  register_diag_field('ocean_model', 'dvdx_v', diag%axesCvL, Time, &
+  !           'dvdx at v point', &
+  !           's-1', conversion=US%s_to_T) 
+  ! CS%id_vy_v =  register_diag_field('ocean_model', 'dvdy_v', diag%axesCvL, Time, &
+  !           'dvdy at v point', &
+  !           's-1', conversion=US%s_to_T) 
 
   
 
