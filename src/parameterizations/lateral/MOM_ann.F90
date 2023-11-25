@@ -66,7 +66,7 @@ subroutine ann_init(CS, use_ANN, param_file)
     call log_version(param_file, mdl, version, "")
 
     call get_param(param_file, mdl, "USE_ANN", use_ANN, &
-                   "If true, turns on the ANN", default=.true.)
+                   "If true, turns on the ANN", default=.false.)
     if (.not. use_ANN) return
 
     ! Read in number of layers and their sizes

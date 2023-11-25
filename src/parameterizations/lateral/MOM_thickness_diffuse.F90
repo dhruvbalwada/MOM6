@@ -57,11 +57,13 @@ type, public :: thickness_diffuse_CS ; private
   logical :: USE_ANN             !< If true, thickness diffusion is done use a Stream function computed from ANN     
   logical :: ANN_USE_clip
   logical :: ANN_remove_bias
+  logical :: ANN_use_lower
   logical :: USE_UPSLOPE_LIM
   real    :: ANN_const           !< An amplification constant that multiplies the stream function returned from ANN.
   real    :: ANN_grad_supp
   real    :: ANN_grad_clip
   real    :: ANN_slope_clip
+  real    :: ANN_FGR             !< Ratio of filter to grid used.
   !!
   logical :: use_FGNV_streamfn   !< If true, use the streamfunction formulation of
                                  !! Ferrari et al., 2010, which effectively emphasizes
@@ -1806,7 +1808,8 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
 ! local variables 
   integer i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
 
-  real, dimension(6) :: x
+  !real, dimension(6) :: x
+  real, dimension(7) :: x
   real, dimension(2) :: y, y_zeros
 
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudx, dudy, dvdx, dvdy !< u vel
@@ -1850,6 +1853,7 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
 
   ! zero grads (will be used to remove bias if ANN_remove_bias=True)
   x = 0.0
+  x(7) = CS%ANN_FGR * G%dxT(1,1) / 1.e3 ! since input is digested in km
   call ann(x, y_zeros, ANN_CSp)
 
   !call vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
@@ -1862,11 +1866,17 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
       do k = 2, nz
 
         ! Thickness weighted mean
-        x(1) = ( dudx(i,j,k-1) * h(i,j,k-1)  + dudx(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
-        x(2) = ( dudy(i,j,k-1) * h(i,j,k-1)  + dudy(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
-        x(3) = ( dvdx(i,j,k-1) * h(i,j,k-1)  + dvdx(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
-        x(4) = ( dvdy(i,j,k-1) * h(i,j,k-1)  + dvdy(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
-
+        if (CS%ANN_use_lower) then 
+          x(1) =  dudx(i,j,k)   * CS%ANN_grad_supp * G%mask2dT(i,j)
+          x(2) =  dudy(i,j,k)   * CS%ANN_grad_supp * G%mask2dT(i,j)
+          x(3) =  dvdx(i,j,k)   * CS%ANN_grad_supp * G%mask2dT(i,j)
+          x(4) =  dvdy(i,j,k)   * CS%ANN_grad_supp * G%mask2dT(i,j)
+        else  ! do thickness average 
+          x(1) = ( dudx(i,j,k-1) * h(i,j,k-1)  + dudx(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
+          x(2) = ( dudy(i,j,k-1) * h(i,j,k-1)  + dudy(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
+          x(3) = ( dvdx(i,j,k-1) * h(i,j,k-1)  + dvdx(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
+          x(4) = ( dvdy(i,j,k-1) * h(i,j,k-1)  + dvdy(i,j,k) * h(i,j,k) ) / (h(i,j,k-1) + h(i,j,k)) * CS%ANN_grad_supp * G%mask2dT(i,j)
+        endif 
         ! x(1) = 0.5*(dudx(i,j,k-1) + dudx(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
         ! x(2) = 0.5*(dudy(i,j,k-1) + dudy(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
         ! x(3) = 0.5*(dvdx(i,j,k-1) + dvdx(i,j,k))* CS%ANN_grad_supp * G%mask2dT(i,j)
@@ -1875,6 +1885,8 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
         x(5) = - 0.5*(slope_x(I,j,k) + slope_x(I-1,j,k)) * G%mask2dT(i,j)
         x(6) = - 0.5*(slope_y(i,J,k) + slope_y(i,J-1,k)) * G%mask2dT(i,j)
         
+        x(7) = CS%ANN_FGR * G%dxT(i,j) / 1.e3 ! since input is digested in km
+
         call ann(x,y, ANN_CSp)
 
         if (CS%ANN_remove_bias) then
@@ -2693,6 +2705,9 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   call get_param(param_file, mdl, "C_ANN", CS%ANN_const, &
                 "The nondimensional ANN amplification constant.", &
                 default=1.0, units="nondim")
+  call get_param(param_file, mdl, "ANN_FGR", CS%ANN_FGR, &
+                "Fraction between filter and grid scale.", &
+                default=5.0, units="nondim")
   call get_param(param_file, mdl, "ANN_grad_supp", CS%ANN_grad_supp, &
                 "The nondimensional factor to suppress the gradients.", &
                 default=1., units="nondim")
@@ -2707,7 +2722,10 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
                  default=.false.)
   call get_param(param_file, mdl, "ANN_remove_bias", CS%ANN_remove_bias, &
                  "If true, bias at origin for the ANN is removed", &
-                 default=.true.)            
+                 default=.true.)
+  call get_param(param_file, mdl, "ANN_use_lower", CS%ANN_use_lower, &
+                 "If true, use the velocity gradients from lower layer", &
+                 default=.true.)           
   call get_param(param_file, mdl, "USE_UPSLOPE_LIM", CS%USE_UPSLOPE_LIM, &
                  "If true, upslope fluxes are limited", &
                  default=.false.)            
