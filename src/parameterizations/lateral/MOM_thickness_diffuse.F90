@@ -55,6 +55,7 @@ type, public :: thickness_diffuse_CS ; private
   logical :: USE_TENSOR_CFL_LIM
   real    :: TENSOR_CFL_LIM
   logical :: USE_ANN             !< If true, thickness diffusion is done use a Stream function computed from ANN     
+  logical :: USE_ANN_DIFF        
   logical :: ANN_USE_clip
   logical :: ANN_remove_bias
   logical :: ANN_use_lower
@@ -598,7 +599,8 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, &
                         CS, G, GV, u, v, e, h)
       call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                   int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
-                                  Sfn_ann_x=CS%Sfn_ann_x, Sfn_ann_y=CS%Sfn_ann_y)
+                                  Sfn_ann_x=CS%Sfn_ann_x, Sfn_ann_y=CS%Sfn_ann_y, &
+                                  Kh_u=Kh_u, Kh_v=Kh_v) ! added these last parameters when combined ANN with diff
     else
       !write(*,*) "Using GM"
       ! Use stored slopes and scalar diff
@@ -1142,6 +1144,7 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             endif
 
           else ! .not. use_EOS
+            ! do the slope computation here
             if (present_slope_x) then
               if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = slope_x(I,j,k)
               if (CS%USE_KHTH_TENSOR) then
@@ -1166,7 +1169,9 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
               ! more code needs to be added here (for case where slope is not stored)
             endif
 
-            if (CS%USE_KHTH_TENSOR) then
+            ! This is where the streamfunction is set based on different cases 
+            
+            if (CS%USE_KHTH_TENSOR) then ! if using tensor
               
               Sfn_unlim_u(I,K) = KH_ux(I,j,K)*SlopeX + KH_uy(I,j,K)*SlopeY ! = -KS (but slope sign is wrong)
               
@@ -1175,10 +1180,12 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
               endif
               
               Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * G%dy_Cu(I,j) ! convert to volume flux form
+            else if (CS%use_ANN .and. (.not. CS%USE_ANN_DIFF) ) then  ! if using only ANN 
+              Sfn_unlim_u(I,K) = Sfn_ann_x(I,j,K) * G%dy_Cu(I,j) ! convert to volume flux form
             
-            else if (CS%use_ANN) then 
-              Sfn_unlim_u(I,K) = Sfn_ann_x(I,j,K)
-              Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * G%dy_Cu(I,j) ! convert to volume flux form
+            else if (CS%use_ANN .and. CS%USE_ANN_DIFF)  then ! if using ANN combined with diffusion 
+              Sfn_unlim_u(I,K) = ( Sfn_ann_x(I,j,K) +  KH_u(I,j,K)*Slope  ) * G%dy_Cu(I,j)
+            
             else 
               Sfn_unlim_u(I,K) = ((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope) ! there is double sign error here, which cancels out
             endif
@@ -1480,6 +1487,7 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             endif
 
           else ! .not. use_EOS
+            ! Get the slope 
             if (present_slope_y) then
               if (CS%id_slope_y > 0) CS%diagSlopeY(i,J,k) = slope_y(i,J,k)
               if (CS%USE_KHTH_TENSOR) then
@@ -1511,9 +1519,12 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
               
               Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) *G%dx_Cv(i,J)  ! convert to volume flux form
                                   
-            else if (CS%use_ANN) then
-              Sfn_unlim_v(i,K) = Sfn_ann_y(i,J,K)
-              Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) *G%dx_Cv(i,J)  ! convert to volume flux form
+            else if (CS%use_ANN .and. (.not. CS%USE_ANN_DIFF) ) then
+              Sfn_unlim_v(i,K) = Sfn_ann_y(i,J,K) *G%dx_Cv(i,J)  ! convert to volume flux form
+            
+            else if (CS%use_ANN .and. CS%USE_ANN_DIFF)  then ! if using ANN combined with diffusion 
+              Sfn_unlim_v(i,K) = ( Sfn_ann_y(i,J,K) + KH_v(i,J,K)*Slope) *G%dx_Cv(i,J) 
+            
             else
               Sfn_unlim_v(i,K) = ((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
             endif
@@ -2702,6 +2713,8 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   !               "If true, turns on the ANN", default=.false.)
   ! add's parameters for KHTH_tensor
   CS%use_ANN = use_ANN
+  call get_param(param_file, mdl, "USE_ANN_DIFF", CS%USE_ANN_diff, &
+                 "If true, turns on the ANN with diffusivity", default=.false.) 
   call get_param(param_file, mdl, "C_ANN", CS%ANN_const, &
                 "The nondimensional ANN amplification constant.", &
                 default=1.0, units="nondim")
