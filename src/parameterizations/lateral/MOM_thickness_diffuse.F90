@@ -61,6 +61,7 @@ type, public :: thickness_diffuse_CS ; private
   logical :: ANN_use_lower
   logical :: USE_UPSLOPE_LIM
   real    :: ANN_const           !< An amplification constant that multiplies the stream function returned from ANN.
+  real    :: Filter_iter
   real    :: ANN_grad_supp
   real    :: ANN_grad_clip
   real    :: ANN_slope_clip
@@ -1819,6 +1820,8 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
 ! local variables 
   integer i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
 
+  integer :: current_halo, remaining_iterations
+
   !real, dimension(6) :: x
   real, dimension(7) :: x
   real, dimension(2) :: y, y_zeros
@@ -1922,6 +1925,28 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
 
     call pass_var(Sfn_ann_x_C, G%domain)
     call pass_var(Sfn_ann_y_C, G%domain)
+
+    current_halo = 4
+    remaining_iterations = CS%Filter_iter
+    call filter_3D(Sfn_ann_x_C, G%mask2dT(:,:) * 0.0625,  &
+              G%isd, G%ied, G%jsd, G%jed,                 &
+              G%isc, G%iec, G%jsc, G%jec, GV%ke+1,        &
+              current_halo, remaining_iterations,                            &
+              .True.)
+
+    current_halo = 4
+    remaining_iterations = CS%Filter_iter
+    call filter_3D(Sfn_ann_y_C, G%mask2dT(:,:) * 0.0625,  &
+              G%isd, G%ied, G%jsd, G%jed,                 &
+              G%isc, G%iec, G%jsc, G%jec, GV%ke+1,        &
+              current_halo, remaining_iterations,                            &
+              .True.)
+
+    ! Here we gaurantee that the halo size is at least 2
+    if (current_halo <= 1) then
+      call pass_var(Sfn_ann_x_C, G%domain)
+      call pass_var(Sfn_ann_y_C, G%domain)
+    endif 
 
     ! Interpolate Stream functions out to u points
     do I = Isq, Ieq
@@ -2721,6 +2746,9 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   call get_param(param_file, mdl, "ANN_FGR", CS%ANN_FGR, &
                 "Fraction between filter and grid scale.", &
                 default=5.0, units="nondim")
+  call get_param(param_file, mdl, "Filter_iter", CS%Filter_iter, &
+                "Number of filter iterations.", &
+                default=0., units="nondim")
   call get_param(param_file, mdl, "ANN_grad_supp", CS%ANN_grad_supp, &
                 "The nondimensional factor to suppress the gradients.", &
                 default=1., units="nondim")
@@ -3215,6 +3243,81 @@ subroutine thickness_diffuse_end(CS, CDp)
 
   if (allocated(CS%khth2d)) deallocate(CS%khth2d)
 end subroutine thickness_diffuse_end
+
+!> Spatial lateral filter applied to 3D array. The lateral filter is given
+!! by the convolutional kernel:
+!!     [1 2 1]
+!! C = |2 4 2| * 1/16
+!!     [1 2 1]
+!! The fast algorithm decomposes the 2D filter into two 1D filters as follows:
+!!     [1]
+!! C = |2| * [1 2 1] * 1/16
+!!     [1]
+!! The input array must have zero B.C. applied. B.C. is applied for output array.
+!! Note that maskw contains both land mask and 1/16 factor.
+!! Filter implements marching halo. The available halo is specified and as many
+!! filter iterations as possible and as needed are performed.
+subroutine filter_3D(x, maskw, isd, ied, jsd, jed, is, ie, js, je, nz, &
+    current_halo, remaining_iterations, direction)
+  integer, intent(in) :: isd !< Indices of array size
+  integer, intent(in) :: ied !< Indices of array size
+  integer, intent(in) :: jsd !< Indices of array size
+  integer, intent(in) :: jed !< Indices of array size
+  integer, intent(in) :: is  !< Indices of owned points
+  integer, intent(in) :: ie  !< Indices of owned points
+  integer, intent(in) :: js  !< Indices of owned points
+  integer, intent(in) :: je  !< Indices of owned points
+  integer, intent(in) :: nz  !< Vertical array size
+  real, dimension(isd:ied,jsd:jed,nz), &
+  intent(inout) :: x !< Input/output array [arbitrary]
+  real, dimension(isd:ied,jsd:jed), &
+  intent(in) :: maskw !< Mask array of land points divided by 16 [nondim]
+  integer, intent(inout) :: current_halo         !< Currently available halo points
+  integer, intent(inout) :: remaining_iterations !< The number of iterations to perform
+  logical, intent(in)    :: direction            !< The direction of the first 1D filter
+
+  real, parameter :: weight = 2. ! Filter weight [nondim]
+  integer :: i, j, k, iter, niter, halo
+
+  real :: tmp(isd:ied, jsd:jed) ! Array with temporary results [arbitrary]
+
+  ! Do as many iterations as needed and possible
+  niter = min(current_halo, remaining_iterations)
+  if (niter == 0) return ! nothing to do
+
+  ! Update remaining iterations
+  remaining_iterations = remaining_iterations - niter
+  ! Update halo information
+  current_halo = current_halo - niter
+
+  do k=1,Nz
+    halo = niter-1 + &
+    current_halo ! Save as many halo points as possible
+    do iter=1,niter
+
+      if (direction) then
+        do j = js-halo, je+halo; do i = is-halo-1, ie+halo+1
+          tmp(i,j) = weight * x(i,j,k) + (x(i,j-1,k) + x(i,j+1,k))
+        enddo; enddo
+
+        do j = js-halo, je+halo; do i = is-halo, ie+halo;
+          x(i,j,k) = (weight * tmp(i,j) + (tmp(i-1,j) + tmp(i+1,j))) * maskw(i,j)
+        enddo; enddo
+      else
+        do j = js-halo-1, je+halo+1; do i = is-halo, ie+halo
+         tmp(i,j) = weight * x(i,j,k) + (x(i-1,j,k) + x(i+1,j,k))
+        enddo; enddo
+
+        do j = js-halo, je+halo; do i = is-halo, ie+halo;
+          x(i,j,k) = (weight * tmp(i,j) + (tmp(i,j-1) + tmp(i,j+1))) * maskw(i,j)
+        enddo; enddo
+      endif
+
+    halo = halo - 1
+    enddo
+  enddo
+
+end subroutine filter_3D
 
 !> \namespace mom_thickness_diffuse
 !!
