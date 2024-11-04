@@ -32,7 +32,7 @@ type, public :: ANN_CS ; private
     integer :: num_layers ! number of layers 
     integer, allocatable :: layer_sizes(:) ! size of each layer, including input
     character(len=200) :: NNfile   ! The name of netcdf file having neural network shape function
-
+    logical :: ANN_local_norm !< If true, use local normalization approach
     ! How do have arbitrary number of weight matrices ? 
     ! for arbitrary number of layers.
     ! for now choose 3, as it works for me. 
@@ -59,6 +59,7 @@ subroutine ann_init(CS, use_ANN, param_file)
     character(len=1) :: b = 'b'
     character(len=1) :: layer_num_str
     character(len=3) :: matrix_name
+    
 
 #include "version_variable.h"
     character(len=40) :: mdl = "MOM_ann"
@@ -74,6 +75,9 @@ subroutine ann_init(CS, use_ANN, param_file)
                    "Number of ANN layers", default=4)
     call get_param(param_file, mdl, "ANN_PARAMS_FILE", CS%NNfile, &
                    "ANN parameters netcdf input", default="ann_params_50km.nc")
+    call get_param(param_file, mdl, "ANN_local_norm", CS%ANN_local_norm, &
+                   "If true, use the local normalization approach", &
+                  default=.true.)   
 
     ! Read size of layers
     allocate(CS%layer_sizes(CS%num_layers))
@@ -83,11 +87,15 @@ subroutine ann_init(CS, use_ANN, param_file)
     !CS%layer_sizes = [2, 24, 24, 2]
 
     ! Read norms
-    allocate(CS%input_norms(CS%layer_sizes(1)))
-    allocate(CS%output_norms(CS%layer_sizes(CS%num_layers)))
+    if (CS%ANN_local_norm) then
+        ! do nothing for now
+    else
+        allocate(CS%input_norms(CS%layer_sizes(1)))
+        allocate(CS%output_norms(CS%layer_sizes(CS%num_layers)))
 
-    call MOM_read_data(CS%NNfile, 'input_norms', CS%input_norms)
-    call MOM_read_data(CS%NNfile, 'output_norms', CS%output_norms)
+        call MOM_read_data(CS%NNfile, 'input_norms', CS%input_norms)
+        call MOM_read_data(CS%NNfile, 'output_norms', CS%output_norms)
+    endif
     
     ! Allocate the layers
     allocate(CS%layers(CS%num_layers-1)) ! since this contains the matrices that move info from one layer to another, it is one size smaller. 
@@ -139,9 +147,14 @@ subroutine ann(x, y, CS)
     allocate(x_1(CS%layer_sizes(1)), source=0.)
     x_1 = x
     ! Normalize input
-    do i = 1,CS%layer_sizes(1)
-        x_1(i) = x_1(i) / CS%input_norms(i)
-    enddo
+    if (CS%ANN_local_norm) then
+        !x_1(i) = x_1(i) !/ CS%input_norms(i)
+        ! do nothing for now
+    else
+        do i = 1,CS%layer_sizes(1)
+            x_1(i) = x_1(i) / CS%input_norms(i)
+        enddo
+    endif
     
     !write(*,*) "input", x_1, "size", CS%layer_sizes(1)
 
@@ -169,9 +182,13 @@ subroutine ann(x, y, CS)
     y = x_1
 
     ! un-normalize output
-    do i = 1, CS%layer_sizes(CS%num_layers)
-        y(i) = y(i) * CS%output_norms(i)
-    enddo
+    if (CS%ANN_local_norm) then
+        ! do nothing for now
+    else
+        do i = 1, CS%layer_sizes(CS%num_layers)
+            y(i) = y(i) * CS%output_norms(i)
+        enddo
+    endif
 
     ! Hacky zero bias 
     ! 50km filter 

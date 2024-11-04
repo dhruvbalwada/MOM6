@@ -58,9 +58,9 @@ type, public :: thickness_diffuse_CS ; private
   logical :: USE_ANN_DIFF        
   logical :: ANN_USE_clip
   logical :: ANN_remove_bias
-  logical :: ANN_use_lower
+  logical :: ANN_use_lower, ANN_local_norm, ANN_para_perp
   logical :: USE_UPSLOPE_LIM
-  real    :: ANN_const           !< An amplification constant that multiplies the stream function returned from ANN.
+  real    :: ANN_const, ANN_const_perp, ANN_const_para           !< An amplification constant that multiplies the stream function returned from ANN.
   real    :: Filter_iter
   real    :: ANN_grad_supp
   real    :: ANN_grad_clip
@@ -1825,9 +1825,11 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
   !real, dimension(6) :: x
   real, dimension(7) :: x
   real, dimension(2) :: y, y_zeros
+  real               :: Sx, Sy, Slope_mag, Shatx, Shaty, Nhatx, Nhaty, vel_grad_mag
 
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudx, dudy, dvdx, dvdy !< u vel
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: Sfn_ann_x_C, Sfn_ann_y_C
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: Sfn_ann_perp_C, Sfn_ann_para_C
   !real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: dudx_u, dudy_u, dvdx_u, dvdy_u !< u vel
   !real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: dudx_v, dudy_v, dvdx_v, dvdy_v !< v vel
 
@@ -1845,6 +1847,8 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
   Sfn_ann_y = 0.0
   Sfn_ann_x_C = 0.0
   Sfn_ann_y_C = 0.0
+  Sfn_ann_perp_C = 0.0
+  Sfn_ann_para_C = 0.0
   Sfn_ann_x_no_lim = 0.0
   Sfn_ann_y_no_lim = 0.0
 
@@ -1898,17 +1902,47 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
 
         x(5) = - 0.5*(slope_x(I,j,k) + slope_x(I-1,j,k)) * G%mask2dT(i,j)
         x(6) = - 0.5*(slope_y(i,J,k) + slope_y(i,J-1,k)) * G%mask2dT(i,j)
-        
+
         x(7) = CS%ANN_FGR * G%dxT(i,j) / 1.e3 ! since input is digested in km
+        if (CS%use_FGNV_streamfn) then ! This is a hack to use with the FGNV streamfunction for NW2 sims
+          x(7) = 100.0
+        endif
+
+        if (CS%ANN_local_norm) then
+          vel_grad_mag = (x(1)**2 + x(2)**2 + x(3)**2 + x(4)**2)**0.5
+          Slope_mag = (x(5)**2 + x(6)**2)**0.5
+          x(1:4) = x(1:4) / vel_grad_mag
+          x(5:6) = x(5:6) / Slope_mag
+          x(7) = x(7) / 400.0 ! This arbitrary scale will have to be modified later
+        endif
 
         call ann(x,y, ANN_CSp)
+
+        if (CS%ANN_local_norm) then
+          y = y * ((x(7)*400.*1.0e3)**2) * vel_grad_mag * Slope_mag
+        endif
 
         if (CS%ANN_remove_bias) then
           Sfn_ann_x_C(i,j,k) =  ( y(1) - y_zeros(1) ) * G%mask2dT(I,j)
           Sfn_ann_y_C(i,j,k) =  ( y(2) - y_zeros(2) ) * G%mask2dT(I,j)
         else
-          Sfn_ann_x_C(i,j,k) =  y(1) * G%mask2dT(I,j)
-          Sfn_ann_y_C(i,j,k) =  y(2) * G%mask2dT(I,j)
+          Sfn_ann_perp_C(i,j,k) =  CS%ANN_const_perp * y(1) * G%mask2dT(I,j)
+          Sfn_ann_para_C(i,j,k) =  CS%ANN_const_para * y(2) * G%mask2dT(I,j)
+        endif
+
+        if (CS%ANN_para_perp) then 
+          Sx = - 0.5*(slope_x(I,j,k) + slope_x(I-1,j,k)) * G%mask2dT(i,j)
+          Sy = - 0.5*(slope_y(i,J,k) + slope_y(i,J-1,k)) * G%mask2dT(i,j)      
+          Slope_mag = (Sx**2 + Sy**2)**0.5
+
+          Shatx = Sx / Slope_mag
+          Shaty = Sy / Slope_mag
+
+          Nhatx = -Sy/ Slope_mag
+          Nhaty = Sx / Slope_mag
+          
+          Sfn_ann_x_C(i,j,k) =  Sfn_ann_perp_C(i,j,k) * Shatx + Sfn_ann_para_C(i,j,k) * Nhatx
+          Sfn_ann_y_C(i,j,k) =  Sfn_ann_perp_C(i,j,k) * Shaty + Sfn_ann_para_C(i,j,k) * Nhaty
         endif
 
         !Start writing diagnostics for debugging 
@@ -1952,8 +1986,9 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
     do I = Isq, Ieq
       do j = js, je
         do k = 2, nz
-          Sfn_ann_x_no_lim(I,j,k) = 0.5 * ( Sfn_ann_x_C(i,j,k) + Sfn_ann_x_C(i+1,j,k) ) * G%mask2dCu(I,j)
-          Sfn_ann_x(I,j,k) =  CS%ANN_const * Sfn_ann_x_no_lim(I,j,k)
+          !Sfn_ann_x_no_lim(I,j,k) = 0.5 * ( Sfn_ann_x_C(i,j,k) + Sfn_ann_x_C(i+1,j,k) ) * G%mask2dCu(I,j)
+          !Sfn_ann_x(I,j,k) =  CS%ANN_const * Sfn_ann_x_no_lim(I,j,k)
+          Sfn_ann_x(I,j,k) = 0.5 * ( Sfn_ann_x_C(I,j,k) + Sfn_ann_x_C(I+1,j,k) ) * G%mask2dCu(I,j)
         enddo
       enddo
     enddo
@@ -1962,8 +1997,9 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
     do i = is, ie
       do J = Jsq, Jeq
         do k = 2, nz
-          Sfn_ann_y_no_lim(i,J,k) = 0.5* ( Sfn_ann_y_C(i,j,k) + Sfn_ann_y_C(i,j+1,k) ) * G%mask2dCv(i,J)
-          Sfn_ann_y(i,J,k) = CS%ANN_const * Sfn_ann_y_no_lim(i,J,k)
+          !Sfn_ann_y_no_lim(i,J,k) = 0.5* ( Sfn_ann_y_C(i,j,k) + Sfn_ann_y_C(i,j+1,k) ) * G%mask2dCv(i,J)
+          !Sfn_ann_y(i,J,k) = CS%ANN_const * Sfn_ann_y_no_lim(i,J,k)
+          Sfn_ann_y(i,J,k) = 0.5* ( Sfn_ann_y_C(i,J,k) + Sfn_ann_y_C(i,J+1,k) ) * G%mask2dCv(i,J)
         enddo
       enddo
     enddo
@@ -2743,6 +2779,12 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   call get_param(param_file, mdl, "C_ANN", CS%ANN_const, &
                 "The nondimensional ANN amplification constant.", &
                 default=1.0, units="nondim")
+  call get_param(param_file, mdl, "C_ANN_perp", CS%ANN_const_perp, &
+                "The nondimensional ANN perp amplification constant.", &
+                 default=1.0, units="nondim")  
+  call get_param(param_file, mdl, "C_ANN_para", CS%ANN_const_para, &
+                 "The nondimensional ANN para amplification constant.", &
+                 default=1.0, units="nondim")
   call get_param(param_file, mdl, "ANN_FGR", CS%ANN_FGR, &
                 "Fraction between filter and grid scale.", &
                 default=5.0, units="nondim")
@@ -2766,7 +2808,13 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
                  default=.true.)
   call get_param(param_file, mdl, "ANN_use_lower", CS%ANN_use_lower, &
                  "If true, use the velocity gradients from lower layer", &
-                 default=.true.)           
+                 default=.true.)   
+  call get_param(param_file, mdl, "ANN_local_norm", CS%ANN_local_norm, &
+                 "If true, use the local normalization approach", &
+                default=.true.)   
+  call get_param(param_file, mdl, "ANN_para_perp", CS%ANN_para_perp, &
+                "If true, the ANN outputs the parallel and perp components", &
+               default=.true.)                                        
   call get_param(param_file, mdl, "USE_UPSLOPE_LIM", CS%USE_UPSLOPE_LIM, &
                  "If true, upslope fluxes are limited", &
                  default=.false.)            
