@@ -54,6 +54,8 @@ type, public :: thickness_diffuse_CS ; private
   logical :: USE_KHTH_TENSOR     !< If true, interface heights are diffused using 2X2 tensor
   logical :: USE_TENSOR_CFL_LIM
   real    :: TENSOR_CFL_LIM
+  logical :: USE_NGM             !< If true, thickness diffusion is done use a Stream function computed from NGM
+  real    :: NGM_const          !< An amplification constant that multiplies the stream function returned from NGM.
   logical :: USE_ANN             !< If true, thickness diffusion is done use a Stream function computed from ANN     
   logical :: USE_ANN_DIFF        
   logical :: ANN_USE_clip
@@ -138,8 +140,8 @@ type, public :: thickness_diffuse_CS ; private
   real, allocatable :: khth2d(:,:)      !< 2D isopycnal height diffusivity at h-points [L2 T-1 ~> m2 s-1]
   
   ! these are for actually calculating, not just diag
-  real, allocatable :: Sfn_ann_x(:,:,:) ! Allocatable arrays to carry around ANN SF
-  real, allocatable :: Sfn_ann_y(:,:,:) ! 
+  real, allocatable :: Sfn_x(:,:,:) ! Allocatable arrays to carry around sfn computed from ANN or NGM
+  real, allocatable :: Sfn_y(:,:,:) ! 
 
   !>@{
   !! Diagnostic identifier
@@ -155,13 +157,14 @@ type, public :: thickness_diffuse_CS ; private
   integer :: id_sfn_unlim_x = -1, id_sfn_unlim_y = -1, id_sfn_x = -1, id_sfn_y = -1
   integer :: id_hu_mask = -1, id_hv_mask = -1
 
-  ! Diagnostics to debug ANN 
+  ! Diagnostics to debug ANN/NGM
   integer :: id_ux_u = -1, id_uy_u = -1, id_vx_u = -1, id_vy_u = -1 ! We can use the ids for slopes from above
   integer :: id_ux_v = -1, id_uy_v = -1, id_vx_v = -1, id_vy_v = -1
   integer :: id_ux_c = -1, id_uy_c = -1, id_vx_c = -1, id_vy_c = -1
-  integer :: id_Sfn_ann_x = -1, id_Sfn_ann_y = -1
-  integer :: id_Sfn_ann_x_C = -1, id_Sfn_ann_y_C = -1
+  integer :: id_sfn_raw_x = -1, id_sfn_raw_y = -1
+  integer :: id_sfn_raw_x_C = -1, id_sfn_raw_y_C = -1
   
+  !integer :: id_Sfn_x = -1, id_Sfn_y = -1
 
   !>@}
 end type thickness_diffuse_CS
@@ -596,12 +599,19 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, &
       ! Use stored slopes and ANN
       !call streamfn_ann(CS%Sfn_ann_x, CS%Sfn_ann_y, VarMix%slope_x, VarMix%slope_y, ANN_CSp, &
       !                  CS, G, GV, u, v, e)
-      call streamfn_ann(CS%Sfn_ann_x, CS%Sfn_ann_y, ANN_CSp, &
+      call streamfn_ann(CS%Sfn_x, CS%Sfn_y, ANN_CSp, &
                         CS, G, GV, u, v, e, h)
       call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                   int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
-                                  Sfn_ann_x=CS%Sfn_ann_x, Sfn_ann_y=CS%Sfn_ann_y, &
+                                  Sfn_x=CS%Sfn_x, Sfn_y=CS%Sfn_y, &
                                   Kh_u=Kh_u, Kh_v=Kh_v) ! added these last parameters when combined ANN with diff
+    elseif (CS%USE_NGM) then 
+      call streamfn_NGM(CS%Sfn_x, CS%Sfn_y,CS, G, GV, u, v, e, h)
+
+      call thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
+                                  int_slope_u, int_slope_v, slope_x=VarMix%slope_x, slope_y=VarMix%slope_y, &
+                                  Sfn_x=CS%Sfn_x, Sfn_y=CS%Sfn_y, &
+                                  Kh_u=Kh_u, Kh_v=Kh_v)
     else
       !write(*,*) "Using GM"
       ! Use stored slopes and scalar diff
@@ -731,7 +741,7 @@ end subroutine thickness_diffuse
 subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, &
                                   CS, int_slope_u, int_slope_v, Kh_u, Kh_v, slope_x, slope_y, &
                                   Kh_ux, Kh_uy, Kh_vx, Kh_vy, &
-                                  Sfn_ann_x, Sfn_ann_y)
+                                  Sfn_x, Sfn_y)
   type(ocean_grid_type),                        intent(in)  :: G     !< Ocean grid structure
   type(verticalGrid_type),                      intent(in)  :: GV    !< Vertical grid structure
   type(unit_scale_type),                        intent(in)  :: US    !< A dimensional unit scaling type
@@ -763,8 +773,8 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), optional, intent(in)  :: Kh_ux, Kh_uy !< Isopycnal height diffusivities 
                                                                                       ! tensor row 1 terms
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), optional, intent(in)  :: Kh_vx, Kh_vy ! < row 2 terms
-  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)+1), optional, intent(in) :: Sfn_ann_x ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
-  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)+1), optional, intent(in) :: Sfn_ann_y ! ANN Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)+1), optional, intent(in) :: Sfn_x !  Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)+1), optional, intent(in) :: Sfn_y !  Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
   
   ! Local variables
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: &
@@ -1182,11 +1192,13 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
               
               Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) * G%dy_Cu(I,j) ! convert to volume flux form
             else if (CS%use_ANN .and. (.not. CS%USE_ANN_DIFF) ) then  ! if using only ANN 
-              Sfn_unlim_u(I,K) = Sfn_ann_x(I,j,K) * G%dy_Cu(I,j) ! convert to volume flux form
+              Sfn_unlim_u(I,K) = Sfn_x(I,j,K) * G%dy_Cu(I,j) ! convert to volume flux form
             
             else if (CS%use_ANN .and. CS%USE_ANN_DIFF)  then ! if using ANN combined with diffusion 
-              Sfn_unlim_u(I,K) = ( Sfn_ann_x(I,j,K) +  KH_u(I,j,K)*Slope  ) * G%dy_Cu(I,j)
+              Sfn_unlim_u(I,K) = ( Sfn_x(I,j,K) +  KH_u(I,j,K)*Slope  ) * G%dy_Cu(I,j)
             
+            else if (CS%USE_NGM) then ! if using NGM
+              Sfn_unlim_u(I,K) = Sfn_x(I,j,K) * G%dy_Cu(I,j)
             else 
               Sfn_unlim_u(I,K) = ((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope) ! there is double sign error here, which cancels out
             endif
@@ -1521,11 +1533,12 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
               Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) *G%dx_Cv(i,J)  ! convert to volume flux form
                                   
             else if (CS%use_ANN .and. (.not. CS%USE_ANN_DIFF) ) then
-              Sfn_unlim_v(i,K) = Sfn_ann_y(i,J,K) *G%dx_Cv(i,J)  ! convert to volume flux form
+              Sfn_unlim_v(i,K) = Sfn_y(i,J,K) *G%dx_Cv(i,J)  ! convert to volume flux form
             
             else if (CS%use_ANN .and. CS%USE_ANN_DIFF)  then ! if using ANN combined with diffusion 
-              Sfn_unlim_v(i,K) = ( Sfn_ann_y(i,J,K) + KH_v(i,J,K)*Slope) *G%dx_Cv(i,J) 
-            
+              Sfn_unlim_v(i,K) = ( Sfn_y(i,J,K) + KH_v(i,J,K)*Slope) *G%dx_Cv(i,J) 
+            else if (CS%USE_NGM) then
+              Sfn_unlim_v(i,K) = Sfn_y(i,J,K) *G%dx_Cv(i,J)
             else
               Sfn_unlim_v(i,K) = ((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
             endif
@@ -2004,98 +2017,6 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
       enddo
     enddo
 
-
- !  stream function on u points
-  ! do i = is-1, ie
-  !   do j = js, je
-  !     do k = 2, nz ! not setting values at the surface and bottom.
-        
-  !       ! Input order u_x, u_y, v_x, v_y
-  !       x(1) = 0.5*(dudx_u(i,j,k-1) + dudx_u(i,j,k))* CS%ANN_grad_supp
-  !       x(2) = 0.5*(dudy_u(i,j,k-1) + dudy_u(i,j,k))* CS%ANN_grad_supp
-  !       x(3) = 0.5*(dvdx_u(i,j,k-1) + dvdx_u(i,j,k))* CS%ANN_grad_supp
-  !       x(4) = 0.5*(dvdy_u(i,j,k-1) + dvdy_u(i,j,k))* CS%ANN_grad_supp
-        
-  !       !x(5) = slope_x(i,j,k) 
-  !       !x(6) = slope_x(i,j,k) 
-  !       x(5) = - slope_x(I,j,k) * G%mask2dCu(I,j)  ! ugh we need a minus sign for the slope here because without EOS the sign of slope in MOM6 is wrong.
-  !       x(6) = - 0.25*(slope_y(I,j,k) * G%mask2dCv(I,j)  + &
-  !                    slope_y(I,j-1,k) * G%mask2dCv(I,j-1)  + &
-  !                    slope_y(I+1,j,k)* G%mask2dCv(I+1,j)  + &
-  !                    slope_y(I+1, j-1, k)* G%mask2dCv(I+1,j-1)  ) *  &
-  !                    G%mask2dCu(I,j) 
-
-  !       ! Start writing diagnostics for debugging 
-  !       if (CS%id_slope_xu > 0) CS%diagSlopeXu(I,j,k) = x(5)
-  !       if (CS%id_slope_yu > 0) CS%diagSlopeYu(I,j,k) = x(6)            
-        
-        
-  !       if (CS%ANN_USE_clip) then
-  !         ! Clip grads
-  !         if (abs(x(1)) > CS%ANN_grad_clip) x(1) = sign(CS%ANN_grad_clip, x(1))
-  !         if (abs(x(2)) > CS%ANN_grad_clip) x(2) = sign(CS%ANN_grad_clip, x(2))
-  !         if (abs(x(3)) > CS%ANN_grad_clip) x(3) = sign(CS%ANN_grad_clip, x(3))
-  !         if (abs(x(4)) > CS%ANN_grad_clip) x(4) = sign(CS%ANN_grad_clip, x(4))
-  !         ! Clip slopes
-  !         if (abs(x(5)) > CS%ANN_slope_clip) x(5) = sign(CS%ANN_slope_clip, x(5))
-  !         if (abs(x(6)) > CS%ANN_slope_clip) x(6) = sign(CS%ANN_slope_clip, x(6))
-  !       endif
-
-  !       call ann(x,y, ANN_CSp)
-  !       Sfn_ann_x_no_lim(i,j,k) =  y(1) * G%mask2dCu(I,j)
-  !       Sfn_ann_x(i,j,k) = CS%ANN_const * y(1) * G%mask2dCu(I,j)
-  !       !Sfn_ann_y(i,j,k) = y(2)
-
-  !     enddo
-  !   enddo
-  ! enddo
-
-  !  stream function on v points
-  ! do i = is, ie
-  !   do j = js-1, je
-  !     do k = 2, nz ! not setting values at the surface and bottom.
-        
-  !       x(1) = 0.5*(dudx_v(i,j,k-1) + dudx_v(i,j,k))* CS%ANN_grad_supp
-  !       x(2) = 0.5*(dudy_v(i,j,k-1) + dudy_v(i,j,k))* CS%ANN_grad_supp
-  !       x(3) = 0.5*(dvdx_v(i,j,k-1) + dvdx_v(i,j,k))* CS%ANN_grad_supp
-  !       x(4) = 0.5*(dvdy_v(i,j,k-1) + dvdy_v(i,j,k))* CS%ANN_grad_supp
-        
-  !       !x(5) = slope_y(i,j,k)
-  !       !x(6) = slope_y(i,j,k)
-  !       x(5) = - 0.25*(slope_x(i,J,k) * G%mask2dCu(i,J) + &
-  !                              slope_x(i-1,J,k) * G%mask2dCu(i-1,J)  + &
-  !                              slope_x(i,J+1,k) * G%mask2dCu(i,J+1) + &
-  !                              slope_x(i-1,J+1,k)* G%mask2dCu(i-1,J+1)  ) * &
-  !                              G%mask2dCv(i,J) 
-  !       x(6) = - slope_y(i,J,k) * G%mask2dCv(i,J)
-
-  !       ! Start writing diagnostics for debugging 
-
-  !       if (CS%id_slope_xv > 0) CS%diagSlopeXv(I,j,k) = x(5)
-  !       if (CS%id_slope_yv > 0) CS%diagSlopeYv(I,j,k) = x(6) 
-
-  !       if (CS%ANN_USE_clip) then
-  !         ! Clip grads
-  !         if (abs(x(1)) > CS%ANN_grad_clip) x(1) = sign(CS%ANN_grad_clip, x(1))
-  !         if (abs(x(2)) > CS%ANN_grad_clip) x(2) = sign(CS%ANN_grad_clip, x(2))
-  !         if (abs(x(3)) > CS%ANN_grad_clip) x(3) = sign(CS%ANN_grad_clip, x(3))
-  !         if (abs(x(4)) > CS%ANN_grad_clip) x(4) = sign(CS%ANN_grad_clip, x(4))
-  !         ! Clip slopes
-  !         if (abs(x(5)) > CS%ANN_slope_clip) x(5) = sign(CS%ANN_slope_clip, x(5))
-  !         if (abs(x(6)) > CS%ANN_slope_clip) x(6) = sign(CS%ANN_slope_clip, x(6))
-  !       endif
-        
-  !       call ann(x,y, ANN_CSp)
-        
-  !       !Sfn_ann_x(i,j,k) = y(1)
-  !       Sfn_ann_y_no_lim(i,j,k) =  y(2) * G%mask2dCv(i,J)
-  !       Sfn_ann_y(i,j,k) = CS%ANN_const * y(2) * G%mask2dCv(i,J)
-
-  !     enddo
-  !   enddo
-  ! enddo
-
-
   ! post velocity gradients
   if (CS%id_ux_c > 0) call post_data(CS%id_ux_c, CS%diagUXc, CS%diag)
   if (CS%id_uy_c > 0) call post_data(CS%id_uy_c, CS%diagUYc, CS%diag)
@@ -2111,10 +2032,10 @@ subroutine streamfn_ann(Sfn_ann_x, Sfn_ann_y, ANN_CSp, CS, G, GV, u, v, e, h)
   if (CS%id_slope_yc > 0) call post_data(CS%id_slope_yc, CS%diagSlopeYc, CS%diag)
 
   ! post streamfunctions 
-  if (CS%id_Sfn_ann_x > 0) call post_data(CS%id_Sfn_ann_x, Sfn_ann_x_no_lim, CS%diag)
-  if (CS%id_Sfn_ann_y > 0) call post_data(CS%id_Sfn_ann_y, Sfn_ann_y_no_lim, CS%diag)
-  if (CS%id_Sfn_ann_x_C > 0) call post_data(CS%id_Sfn_ann_x_C, Sfn_ann_x_C, CS%diag)
-  if (CS%id_Sfn_ann_y_C > 0) call post_data(CS%id_Sfn_ann_y_C, Sfn_ann_y_C, CS%diag)
+  if (CS%id_sfn_raw_x > 0) call post_data(CS%id_sfn_raw_x, Sfn_ann_x_no_lim, CS%diag)
+  if (CS%id_sfn_raw_y > 0) call post_data(CS%id_sfn_raw_y, Sfn_ann_y_no_lim, CS%diag)
+  if (CS%id_sfn_raw_x_C > 0) call post_data(CS%id_sfn_raw_x_C, Sfn_ann_x_C, CS%diag)
+  if (CS%id_sfn_raw_y_C > 0) call post_data(CS%id_sfn_raw_y_C, Sfn_ann_y_C, CS%diag)
 
   ! write the velocity gradients (what is used is actually the vertical averages)
   
@@ -2166,7 +2087,6 @@ subroutine slope_calc(e, G, GV, slope_x, slope_y)
   enddo
 
 end subroutine slope_calc
-
 
 ! Computes velocity gradients at u and v points
 !subroutine vel_gradients(u, v, G, GV, dudx_u, dudy_u, dvdx_u, dvdy_u, dudx_v, dudy_v, dvdx_v, dvdy_v)
@@ -2231,6 +2151,127 @@ subroutine vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy)
 
 end subroutine vel_gradients
 
+subroutine streamfn_NGM(Sfn_NGM_x, Sfn_NGM_y, CS, G, Gv, u, v, e, h)
+  type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
+  type(verticalGrid_type),                   intent(in)    :: GV  !< The ocean's vertical grid structure.
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(in)    :: u   !< The zonal velocity [L T-1 ~> m s-1].
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(in)    :: v   !< The meridional velocity [L T-1 ~> m s-1].
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1),intent(in)   :: e   !< Inteface height [L ~> m].
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),intent(in)     :: h   !< Layer thickness [L ~> m].
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)+1), intent(inout) :: Sfn_NGM_x ! NGM Streamfunction for u-points [Z L2 T-1 ~> m3 s-1].
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)+1), intent(inout) :: Sfn_NGM_y ! NGM Streamfunction for v-points [Z L2 T-1 ~> m3 s-1].
+  
+
+  type(thickness_diffuse_CS), intent(inout) :: CS !< Control structure for thickness_diffuse
+
+  integer i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
+
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudx, dudy, dvdx, dvdy !< u vel
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dhdx, dhdy
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: uphp, vphp
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: Sfn_NGM_x_C, Sfn_NGM_y_C 
+  real :: coeff_NGM
+
+  ! initialize 
+  Sfn_NGM_x_C=0.0
+  Sfn_NGM_y_C=0.0
+
+  is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
+  Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
+
+  call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy)
+  call thickness_gradient_calc(h, G, GV, dhdx, dhdy)
+  ! ToDo: Need to compute the isopycnal heights relative to reference
+
+  ! Compute the eddy thickness flux at center points
+  do i = is-1,ie+1
+    do j = js-1,je+1
+      do k = 1, nz
+        uphp(i,j,k) = CS%NGM_const * G%areaT(i,j) *( dudx(i,j,k)*dhdx(i,j,k) + dudy(i,j,k)*dhdy(i,j,k) )* G%mask2dT(i,j)
+        vphp(i,j,k) = CS%NGM_const * G%areaT(i,j) *( dvdx(i,j,k)*dhdx(i,j,k) + dvdy(i,j,k)*dhdy(i,j,k) )* G%mask2dT(i,j)
+      enddo
+    enddo
+  enddo
+
+  ! Compute the streamfunction at center points, which is defined as the sum of the thickness fluxes
+  ! below the point in k (summing starting at nz+1).
+  do i = is-1,ie+1
+    do j = js-1,je+1
+      do k = nz, 1, -1 ! start at nz, since nz+1 value is 0. 
+        Sfn_NGM_x_C(i,j,k) = Sfn_NGM_x_C(i,j,k+1) + uphp(i,j,k)
+        Sfn_NGM_y_C(i,j,k) = Sfn_NGM_y_C(i,j,k+1) + vphp(i,j,k)
+      enddo
+    enddo
+  enddo
+
+  ! Interpolate Stream functions out to u points
+  do I = Isq, Ieq
+    do j = js, je
+      do k = 1, nz+1
+        Sfn_NGM_x(I,j,k) = 0.5 * ( Sfn_NGM_x_C(I,j,k) + Sfn_NGM_x_C(I+1,j,k) ) * G%mask2dCu(I,j)
+      enddo
+    enddo
+  enddo
+  
+  ! Interpolate Stream functions out to v points 
+  do i = is, ie
+    do J = Jsq, Jeq
+      do k = 1, nz+1
+        Sfn_NGM_y(i,J,k) = 0.5* ( Sfn_NGM_y_C(i,J,k) + Sfn_NGM_y_C(i,J+1,k) ) * G%mask2dCv(i,J)
+      enddo
+    enddo
+  enddo
+
+  ! post streamfunctions 
+  if (CS%id_sfn_raw_x > 0) call post_data(CS%id_sfn_raw_x, Sfn_NGM_x, CS%diag)
+  if (CS%id_sfn_raw_y > 0) call post_data(CS%id_sfn_raw_y, Sfn_NGM_y, CS%diag)
+  if (CS%id_sfn_raw_x_C > 0) call post_data(CS%id_sfn_raw_x_C, Sfn_NGM_x_C, CS%diag)
+  if (CS%id_sfn_raw_y_C > 0) call post_data(CS%id_sfn_raw_y_C, Sfn_NGM_y_C, CS%diag)
+
+end subroutine streamfn_NGM
+
+subroutine thickness_gradient_calc(h, G, GV, dhdx, dhdy)
+  type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
+  type(verticalGrid_type),                   intent(in)    :: GV  !< The ocean's vertical grid structure.
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),intent(in)    :: h   !< The layer thickness [L ~> m].
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),intent(out)   :: dhdx, dhdy !< The layer thickness gradients [L-1 ~> nondim].
+
+  integer i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: h_x 
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: h_y
+
+  is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
+  Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
+
+  ! loop over u points 
+  do I = Isq-1, Ieq+1
+    do j = js-2, je+2 
+      do k = 1, nz
+      h_x(I,j,k) = ((h(i+1,j,K)-h(i,j,K))*G%IdxCu(I,j)) * G%OBCmaskCu(I,j)
+      enddo
+    enddo
+  enddo
+
+  ! loop over v points 
+  do i = is-2, ie+2
+    do J = Jsq-1, Jeq+1
+      do k = 1, nz
+        h_y(i,J,k)= ((h(i,j+1,K)-h(i,j,K))*G%IdyCv(i,J)) * G%OBCmaskCv(i,J)
+      enddo
+    enddo
+  enddo
+
+  ! interpolate to center points 
+  do i = is-1,ie+1
+    do j = js-1,je+1
+      do k = 1, nz
+        dhdx(i,j,k) = 0.5 * (h_x(I,j,k) + h_x(I-1,j,k)) * G%mask2dT(i,j)
+        dhdy(i,j,k) = 0.5 * (h_y(i,J,k) + h_y(i,J-1,k)) * G%mask2dT(i,j)
+      enddo
+    enddo
+  enddo
+
+end subroutine thickness_gradient_calc
 
 !> Tridiagonal solver for streamfunction at interfaces
 subroutine streamfn_solver(nk, c2_h, hN2, sfn)
@@ -2737,6 +2778,7 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
   type(cont_diag_ptrs),    intent(inout) :: CDp  !< Continuity equation diagnostics
   type(thickness_diffuse_CS), intent(inout) :: CS !< Control structure for thickness_diffuse
   logical                , intent(in) :: use_ann !< flag to tell if ANN needs to be on.
+  
 
   ! Local variables
   character(len=40)  :: mdl = "MOM_thickness_diffuse" ! This module's name.
@@ -2770,8 +2812,11 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
                  default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)
   ! DB
   ! Get ANN param for turning on.
-  !call get_param(param_file, mdl, "USE_ANN", CS%use_ANN, &
-  !               "If true, turns on the ANN", default=.false.)
+  call get_param(param_file, mdl, "USE_NGM", CS%use_NGM, &
+                 "If true, turns on the NGM", default=.false.)
+  call get_param(param_file, mdl, "C_NGM", CS%NGM_const, &
+                 "The nondimensional NGM coeff.", &
+                 default=1.0, units="nondim")            
   ! add's parameters for KHTH_tensor
   CS%use_ANN = use_ANN
   call get_param(param_file, mdl, "USE_ANN_DIFF", CS%USE_ANN_diff, &
@@ -3021,9 +3066,9 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
     allocate(CS%KH_v_GME(G%isd:G%ied, G%JsdB:G%JedB, GV%ke+1), source=0.)
   endif
 
-  if (CS%use_ANN) then
-    allocate(CS%Sfn_ann_x(G%IsdB:G%IedB, G%jsd:G%jed, GV%ke+1), source=0.)
-    allocate(CS%Sfn_ann_y(G%isd:G%ied, G%JsdB:G%JedB, GV%ke+1), source=0.)
+  if (CS%use_ANN .or. CS%use_NGM) then
+    allocate(CS%Sfn_x(G%IsdB:G%IedB, G%jsd:G%jed, GV%ke+1), source=0.)
+    allocate(CS%Sfn_y(G%isd:G%ied, G%JsdB:G%JedB, GV%ke+1), source=0.)
   endif
 
   CS%id_uhGM = register_diag_field('ocean_model', 'uhGM', diag%axesCuL, Time, &
@@ -3159,19 +3204,18 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
            'Parameterized Meridional Overturning Streamfunction before limiting/smoothing', &
            'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
 
-  ! To debug ANN 
-    ! For the ANN generated stream functions
-  CS%id_Sfn_ann_x = register_diag_field('ocean_model', 'ANN_sfn_x', diag%axesCui, Time, &
-            'Parameterized Zonal Overturning Streamfunction from ANN', &
+  ! To debug ANN or NGM
+  CS%id_sfn_raw_x = register_diag_field('ocean_model', 'raw_sfn_x', diag%axesCui, Time, &
+            'Parameterized Zonal Overturning Streamfunction from ANN or NGM', &
             'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
-  CS%id_Sfn_ann_y = register_diag_field('ocean_model', 'ANN_sfn_y', diag%axesCvi, Time, &
-            'Parameterized Meridional Overturning Streamfunction from ANN', &
+  CS%id_sfn_raw_y = register_diag_field('ocean_model', 'raw_sfn_y', diag%axesCvi, Time, &
+            'Parameterized Meridional Overturning Streamfunction from ANN or NGM', &
             'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
-  CS%id_Sfn_ann_x_C = register_diag_field('ocean_model', 'ANN_sfn_x_C', diag%axesTi, Time, &
-            'Parameterized Zonal Overturning Streamfunction from ANN at C', &
+  CS%id_sfn_raw_x_C = register_diag_field('ocean_model', 'raw_sfn_x_C', diag%axesTi, Time, &
+            'Parameterized Zonal Overturning Streamfunction from ANN or NGM at C', &
             'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
-  CS%id_Sfn_ann_y_C = register_diag_field('ocean_model', 'ANN_sfn_y_C', diag%axesTi, Time, &
-            'Parameterized Meridional Overturning Streamfunction from ANN at C', &
+  CS%id_sfn_raw_y_C = register_diag_field('ocean_model', 'raw_sfn_y_C', diag%axesTi, Time, &
+            'Parameterized Meridional Overturning Streamfunction from ANN or NGM at C', &
             'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
 
     ! The gradients generated for inputs into the ML model 
@@ -3284,9 +3328,9 @@ subroutine thickness_diffuse_end(CS, CDp)
     deallocate(CS%KH_v_GME)
   endif
 
-  if (CS%use_ANN) then
-    deallocate(CS%Sfn_ann_x)
-    deallocate(CS%Sfn_ann_y)
+  if (CS%use_ANN .or. CS%use_NGM) then
+    deallocate(CS%Sfn_x)
+    deallocate(CS%Sfn_y)
   endif
 
   if (allocated(CS%khth2d)) deallocate(CS%khth2d)
