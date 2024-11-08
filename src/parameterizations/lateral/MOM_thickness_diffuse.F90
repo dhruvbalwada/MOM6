@@ -124,7 +124,7 @@ type, public :: thickness_diffuse_CS ; private
   real, allocatable :: diagSlopeYc(:,:,:)  !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
   
   real, allocatable :: diagUXc(:,:,:), diagUYc(:,:,:), diagVXc(:,:,:), diagVYc(:,:,:) !< Diagnostics for velocity gradient tensor at C points
-
+  real, allocatable :: diagHXc(:,:,:), diagHYc(:,:,:)
   ! Diagnostics of the vel gradients that are used as inputs
   !real, allocatable :: diag_ux_u(:,:,:), diag_uy_u(:,:,:), diag_vx_u(:,:,:), diag_vy_u(:,:,:)
   !real, allocatable :: diag_ux_v(:,:,:), diag_uy_v(:,:,:), diag_vx_v(:,:,:), diag_vy_v(:,:,:)
@@ -161,6 +161,7 @@ type, public :: thickness_diffuse_CS ; private
   integer :: id_ux_u = -1, id_uy_u = -1, id_vx_u = -1, id_vy_u = -1 ! We can use the ids for slopes from above
   integer :: id_ux_v = -1, id_uy_v = -1, id_vx_v = -1, id_vy_v = -1
   integer :: id_ux_c = -1, id_uy_c = -1, id_vx_c = -1, id_vy_c = -1
+  integer :: id_hx_c = -1, id_hy_c = -1
   integer :: id_sfn_raw_x = -1, id_sfn_raw_y = -1
   integer :: id_sfn_raw_x_C = -1, id_sfn_raw_y_C = -1
   
@@ -1198,7 +1199,7 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
               Sfn_unlim_u(I,K) = ( Sfn_x(I,j,K) +  KH_u(I,j,K)*Slope  ) * G%dy_Cu(I,j)
             
             else if (CS%USE_NGM) then ! if using NGM
-              Sfn_unlim_u(I,K) = Sfn_x(I,j,K) * G%dy_Cu(I,j)
+              Sfn_unlim_u(I,K) = Sfn_x(I,j,K) * G%dy_Cu(I,j) * hu_mask(i,j,k) 
             else 
               Sfn_unlim_u(I,K) = ((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope) ! there is double sign error here, which cancels out
             endif
@@ -1538,7 +1539,7 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             else if (CS%use_ANN .and. CS%USE_ANN_DIFF)  then ! if using ANN combined with diffusion 
               Sfn_unlim_v(i,K) = ( Sfn_y(i,J,K) + KH_v(i,J,K)*Slope) *G%dx_Cv(i,J) 
             else if (CS%USE_NGM) then
-              Sfn_unlim_v(i,K) = Sfn_y(i,J,K) *G%dx_Cv(i,J)
+              Sfn_unlim_v(i,K) = Sfn_y(i,J,K) *G%dx_Cv(i,J) * hv_mask(i,j,k)
             else
               Sfn_unlim_v(i,K) = ((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
             endif
@@ -2181,6 +2182,14 @@ subroutine streamfn_NGM(Sfn_NGM_x, Sfn_NGM_y, CS, G, Gv, u, v, e, h)
 
   call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy)
   call thickness_gradient_calc(h, G, GV, dhdx, dhdy)
+
+  if (CS%id_ux_c > 0) CS%diagUXc = dudx
+  if (CS%id_uy_c > 0) CS%diagUYc = dudy
+  if (CS%id_vx_c > 0) CS%diagVXc = dvdx
+  if (CS%id_vy_c > 0) CS%diagVYc = dvdy
+
+  if (CS%id_hx_c > 0) CS%diagHXc = dhdx
+  if (CS%id_hy_c > 0) CS%diagHYc = dhdy
   ! ToDo: Need to compute the isopycnal heights relative to reference
 
   ! Compute the eddy thickness flux at center points
@@ -2227,6 +2236,15 @@ subroutine streamfn_NGM(Sfn_NGM_x, Sfn_NGM_y, CS, G, Gv, u, v, e, h)
   if (CS%id_sfn_raw_y > 0) call post_data(CS%id_sfn_raw_y, Sfn_NGM_y, CS%diag)
   if (CS%id_sfn_raw_x_C > 0) call post_data(CS%id_sfn_raw_x_C, Sfn_NGM_x_C, CS%diag)
   if (CS%id_sfn_raw_y_C > 0) call post_data(CS%id_sfn_raw_y_C, Sfn_NGM_y_C, CS%diag)
+
+   ! post velocity & thickness gradients
+  if (CS%id_ux_c > 0) call post_data(CS%id_ux_c, CS%diagUXc, CS%diag)
+  if (CS%id_uy_c > 0) call post_data(CS%id_uy_c, CS%diagUYc, CS%diag)
+  if (CS%id_vx_c > 0) call post_data(CS%id_vx_c, CS%diagVXc, CS%diag)
+  if (CS%id_vy_c > 0) call post_data(CS%id_vy_c, CS%diagVYc, CS%diag)
+
+  if (CS%id_hx_c > 0) call post_data(CS%id_hx_c, CS%diagHXc, CS%diag)
+  if (CS%id_hy_c > 0) call post_data(CS%id_hy_c, CS%diagHYc, CS%diag)
 
 end subroutine streamfn_NGM
 
@@ -3219,30 +3237,41 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
             'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
 
     ! The gradients generated for inputs into the ML model 
-  CS%id_ux_c =  register_diag_field('ocean_model', 'dudx_c', diag%axesTi, Time, &
+  CS%id_ux_c =  register_diag_field('ocean_model', 'dudx_c', diag%axesTL, Time, &
             'dudx at c point', &
             's-1', conversion=US%s_to_T) 
   if (CS%id_ux_c > 0) &
-      allocate(CS%diagUXc(SZI_(G),SZJ_(G),SZK_(GV)+1), source=0.)
+      allocate(CS%diagUXc(SZI_(G),SZJ_(G),SZK_(GV)), source=0.)
 
-  CS%id_uy_c =  register_diag_field('ocean_model', 'dudy_c', diag%axesTi, Time, &
+  CS%id_uy_c =  register_diag_field('ocean_model', 'dudy_c', diag%axesTL, Time, &
             'dudy at c point', &
             's-1', conversion=US%s_to_T)  
   if (CS%id_uy_c > 0) &
-      allocate(CS%diagUYc(SZI_(G),SZJ_(G),SZK_(GV)+1), source=0.)
+      allocate(CS%diagUYc(SZI_(G),SZJ_(G),SZK_(GV)), source=0.)
 
-  CS%id_vx_c =  register_diag_field('ocean_model', 'dvdx_c', diag%axesTi, Time, &
+  CS%id_vx_c =  register_diag_field('ocean_model', 'dvdx_c', diag%axesTL, Time, &
             'dvdx at c point', &
             's-1', conversion=US%s_to_T)
   if (CS%id_vx_c > 0) &
-      allocate(CS%diagVXc(SZI_(G),SZJ_(G),SZK_(GV)+1), source=0.)          
+      allocate(CS%diagVXc(SZI_(G),SZJ_(G),SZK_(GV)), source=0.)          
 
-  CS%id_vy_c =  register_diag_field('ocean_model', 'dvdy_c', diag%axesTi, Time, &
+  CS%id_vy_c =  register_diag_field('ocean_model', 'dvdy_c', diag%axesTL, Time, &
             'dvdy at c point', &
             's-1', conversion=US%s_to_T) 
   if (CS%id_vy_c > 0) &
-      allocate(CS%diagVYc(SZI_(G),SZJ_(G),SZK_(GV)+1), source=0.)
+      allocate(CS%diagVYc(SZI_(G),SZJ_(G),SZK_(GV)), source=0.)
 
+  CS%id_hx_c =  register_diag_field('ocean_model', 'dhdx_c', diag%axesTL, Time, &
+      'dhdx at c point', &
+      's-1', conversion=1.) 
+  if (CS%id_hx_c > 0) &
+    allocate(CS%diagHXc(SZI_(G),SZJ_(G),SZK_(GV)), source=0.)
+
+  CS%id_hy_c =  register_diag_field('ocean_model', 'dhdy_c', diag%axesTL, Time, &
+        'dhdy at c point', &
+        's-1', conversion=1.)  
+  if (CS%id_hy_c > 0) &
+    allocate(CS%diagHYc(SZI_(G),SZJ_(G),SZK_(GV)), source=0.)
   ! CS%id_ux_u =  register_diag_field('ocean_model', 'dudx_u', diag%axesCuL, Time, &
   !           'dudx at u point', &
   !           's-1', conversion=US%s_to_T) 
