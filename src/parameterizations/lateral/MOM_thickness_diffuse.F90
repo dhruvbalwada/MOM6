@@ -54,8 +54,11 @@ type, public :: thickness_diffuse_CS ; private
   logical :: USE_KHTH_TENSOR     !< If true, interface heights are diffused using 2X2 tensor
   logical :: USE_TENSOR_CFL_LIM
   real    :: TENSOR_CFL_LIM
+  
   logical :: USE_NGM             !< If true, thickness diffusion is done use a Stream function computed from NGM
   real    :: NGM_const          !< An amplification constant that multiplies the stream function returned from NGM.
+  logical :: USE_DEFORMABLE_H ! If true, use the deformable h formulation
+  
   logical :: USE_ANN             !< If true, thickness diffusion is done use a Stream function computed from ANN     
   logical :: USE_ANN_DIFF        
   logical :: ANN_USE_clip
@@ -124,7 +127,8 @@ type, public :: thickness_diffuse_CS ; private
   real, allocatable :: diagSlopeYc(:,:,:)  !< Diagnostic: zonal neutral slope [Z L-1 ~> nondim]
   
   real, allocatable :: diagUXc(:,:,:), diagUYc(:,:,:), diagVXc(:,:,:), diagVYc(:,:,:) !< Diagnostics for velocity gradient tensor at C points
-  real, allocatable :: diagHXc(:,:,:), diagHYc(:,:,:)
+  real, allocatable :: diagHXc(:,:,:), diagHYc(:,:,:), diagHD(:,:,:) !< Diagnostics for isopycnal height gradient tensor at C points
+  
   ! Diagnostics of the vel gradients that are used as inputs
   !real, allocatable :: diag_ux_u(:,:,:), diag_uy_u(:,:,:), diag_vx_u(:,:,:), diag_vy_u(:,:,:)
   !real, allocatable :: diag_ux_v(:,:,:), diag_uy_v(:,:,:), diag_vx_v(:,:,:), diag_vy_v(:,:,:)
@@ -162,6 +166,7 @@ type, public :: thickness_diffuse_CS ; private
   integer :: id_ux_v = -1, id_uy_v = -1, id_vx_v = -1, id_vy_v = -1
   integer :: id_ux_c = -1, id_uy_c = -1, id_vx_c = -1, id_vy_c = -1
   integer :: id_hx_c = -1, id_hy_c = -1
+  integer :: id_hd = -1 
   integer :: id_sfn_raw_x = -1, id_sfn_raw_y = -1
   integer :: id_sfn_raw_x_C = -1, id_sfn_raw_y_C = -1
   
@@ -1133,7 +1138,11 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = Slope
 
             ! Estimate the streamfunction at each interface [Z L2 T-1 ~> m3 s-1].
-            Sfn_unlim_u(I,K) = -((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope)
+            if (CS%USE_NGM) then 
+              Sfn_unlim_u(I,K) = Sfn_x(i,J,K) *G%dy_Cu(i,J)
+            else
+              Sfn_unlim_u(I,K) = -((KH_u(I,j,K)*G%dy_Cu(I,j))*Slope)
+            endif
 
             ! Avoid moving dense water upslope from below the level of
             ! the bottom on the receiving side.
@@ -1478,7 +1487,11 @@ subroutine thickness_diffuse_full(h, e,  tv, uhD, vhD, cg1, dt, G, GV, US, MEKE,
             if (CS%id_slope_y > 0) CS%diagSlopeY(I,j,k) = Slope
 
             ! Estimate the streamfunction at each interface [Z L2 T-1 ~> m3 s-1].
-            Sfn_unlim_v(i,K) = -((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
+            if (CS%USE_NGM) then 
+              Sfn_unlim_v(i,K) = Sfn_y(i,J,K) *G%dx_Cv(i,J)
+            else
+              Sfn_unlim_v(i,K) = -((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
+            endif
 
             ! Avoid moving dense water upslope from below the level of
             ! the bottom on the receiving side.
@@ -1794,7 +1807,7 @@ subroutine thickness_mask_3D(h, hu_mask, hv_mask, G, GV, CS)
     do j = js, je 
       do i = is-1, ie
         hu_mask(i,j,k) = 0.
-        if ( min(h(i,j,k), h(i+1,j,k)) > .01) hu_mask(i,j,k) = 1.0
+        if ( min(h(i,j,k), h(i+1,j,k)) > 20.) hu_mask(i,j,k) = 1.0
       enddo
     enddo
   enddo
@@ -1803,7 +1816,7 @@ subroutine thickness_mask_3D(h, hu_mask, hv_mask, G, GV, CS)
     do j = js-1, je 
       do i = is, ie
         hv_mask(i,j,k) = 0.
-        if ( min(h(i,j,k), h(i,j+1,k)) > .01) hv_mask(i,j,k) = 1.0
+        if ( min(h(i,j,k), h(i,j+1,k)) > 20.) hv_mask(i,j,k) = 1.0
       enddo
     enddo
   enddo
@@ -2181,7 +2194,7 @@ subroutine streamfn_NGM(Sfn_NGM_x, Sfn_NGM_y, CS, G, Gv, u, v, e, h)
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
 
   call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy)
-  call thickness_gradient_calc(h, G, GV, dhdx, dhdy)
+  call thickness_gradient_calc(h, e, CS, G, GV, dhdx, dhdy)
 
   if (CS%id_ux_c > 0) CS%diagUXc = dudx
   if (CS%id_uy_c > 0) CS%diagUYc = dudy
@@ -2212,6 +2225,9 @@ subroutine streamfn_NGM(Sfn_NGM_x, Sfn_NGM_y, CS, G, Gv, u, v, e, h)
       enddo
     enddo
   enddo
+
+  call pass_var(Sfn_NGM_x_C, G%domain)
+  call pass_var(Sfn_NGM_y_C, G%domain)
 
   ! Interpolate Stream functions out to u points
   do I = Isq, Ieq
@@ -2248,24 +2264,35 @@ subroutine streamfn_NGM(Sfn_NGM_x, Sfn_NGM_y, CS, G, Gv, u, v, e, h)
 
 end subroutine streamfn_NGM
 
-subroutine thickness_gradient_calc(h, G, GV, dhdx, dhdy)
+subroutine thickness_gradient_calc(h, e, CS, G, GV, dhdx, dhdy)
   type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
   type(verticalGrid_type),                   intent(in)    :: GV  !< The ocean's vertical grid structure.
+  type(thickness_diffuse_CS), intent(inout) :: CS 
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),intent(in)    :: h   !< The layer thickness [L ~> m].
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1),intent(in)    :: e   !< The layer thickness [L ~> m].
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),intent(out)   :: dhdx, dhdy !< The layer thickness gradients [L-1 ~> nondim].
 
   integer i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: h_x 
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: h_y
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV))  :: h_dynamic ! thickness to use in deformable only case
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
+
+  if (CS%USE_DEFORMABLE_H) then
+    call calc_deformable_thickness(e, h_dynamic, G, GV)
+  else
+    h_dynamic = h
+  endif
+
+  if (CS%id_hd > 0) CS%diagHD = h_dynamic
 
   ! loop over u points 
   do I = Isq-1, Ieq+1
     do j = js-2, je+2 
       do k = 1, nz
-      h_x(I,j,k) = ((h(i+1,j,K)-h(i,j,K))*G%IdxCu(I,j)) * G%OBCmaskCu(I,j)
+      h_x(I,j,k) = ((h_dynamic(i+1,j,K)-h_dynamic(i,j,K))*G%IdxCu(I,j)) * G%OBCmaskCu(I,j)
       enddo
     enddo
   enddo
@@ -2274,7 +2301,7 @@ subroutine thickness_gradient_calc(h, G, GV, dhdx, dhdy)
   do i = is-2, ie+2
     do J = Jsq-1, Jeq+1
       do k = 1, nz
-        h_y(i,J,k)= ((h(i,j+1,K)-h(i,j,K))*G%IdyCv(i,J)) * G%OBCmaskCv(i,J)
+        h_y(i,J,k)= ((h_dynamic(i,j+1,K)-h_dynamic(i,j,K))*G%IdyCv(i,J)) * G%OBCmaskCv(i,J)
       enddo
     enddo
   enddo
@@ -2289,7 +2316,62 @@ subroutine thickness_gradient_calc(h, G, GV, dhdx, dhdy)
     enddo
   enddo
 
+  call pass_var(dhdx, G%domain)
+  call pass_var(dhdy, G%domain)
+
+  if (CS%id_hd > 0) call post_data(CS%id_hd, CS%diagHD, CS%diag)
+
 end subroutine thickness_gradient_calc
+
+subroutine calc_deformable_thickness(e, hd, G, GV)
+  type(ocean_grid_type),       intent(in) :: G
+  type(verticalGrid_type),     intent(in) :: GV
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), intent(in) :: e
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(inout) :: hd
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: ep, hab ! hab is height above bottom 
+
+  real e_deepest ! Deepest topography
+  integer i, j, k, is, ie, js, je, nz
+
+  is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
+
+  e_deepest = -2000.0 ! minval(e(:,:,nz+1)) how to compute global mean? also should be done only once. 
+ ! PRINT *, 'Deepest topography (e_deepest):', e_deepest
+  ! Calculate the mask
+  do k = 1, nz + 1
+    do i = is-1,ie+1
+      do j = js-1,je+1
+        hab(i, j, k) = e(i, j, k) - e(i, j, nz+1)
+      enddo
+    enddo
+  enddo
+
+  ! ep are the interface z location when interface is not at the topography
+  do k = 1, nz+1
+    do i = is-1,ie+1
+      do j = js-1,je+1
+        
+        if (hab(i, j, k) > 0.1) then
+          ep(i, j, k) = e(i, j, k)
+        else ! set constant values where the topo is 
+          ep(i, j, k) = e_deepest
+        end if
+
+      enddo
+    enddo
+  enddo
+
+  ! Calculate the thickness
+  do k = 1, nz
+    do i = is-1,ie+1
+      do j = js-1,je+1
+        hd(i, j, k) = ep(i, j, k) - ep(i, j, k+1)
+      enddo
+    enddo
+  enddo
+
+
+end subroutine calc_deformable_thickness
 
 !> Tridiagonal solver for streamfunction at interfaces
 subroutine streamfn_solver(nk, c2_h, hN2, sfn)
@@ -2834,7 +2916,9 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
                  "If true, turns on the NGM", default=.false.)
   call get_param(param_file, mdl, "C_NGM", CS%NGM_const, &
                  "The nondimensional NGM coeff.", &
-                 default=1.0, units="nondim")            
+                 default=1.0, units="nondim")  
+  call get_param(param_file, mdl, "USE_DEFORMABLE_H", CS%USE_DEFORMABLE_H, &
+                 "If true, remove effects of bottom topography from thickness gradients", default=.false.)                      
   ! add's parameters for KHTH_tensor
   CS%use_ANN = use_ANN
   call get_param(param_file, mdl, "USE_ANN_DIFF", CS%USE_ANN_diff, &
@@ -3272,6 +3356,11 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS, us
         's-1', conversion=1.)  
   if (CS%id_hy_c > 0) &
     allocate(CS%diagHYc(SZI_(G),SZJ_(G),SZK_(GV)), source=0.)
+
+  CS%id_hd =  register_diag_field('ocean_model', 'hd', diag%axesTL, Time, &
+        'hd at c point', 'm', conversion=1.) 
+  if (CS%id_hd > 0) &
+    allocate(CS%diagHD(SZI_(G),SZJ_(G),SZK_(GV)), source=0.)
   ! CS%id_ux_u =  register_diag_field('ocean_model', 'dudx_u', diag%axesCuL, Time, &
   !           'dudx at u point', &
   !           's-1', conversion=US%s_to_T) 
