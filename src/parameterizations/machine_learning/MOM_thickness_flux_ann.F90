@@ -19,7 +19,7 @@ public thickness_flux_ann, thickness_flux_ann_init, thickness_flux_ann_end
 !> Control structure/type for thickness flux ANN
 type, public :: THICKNESS_FLUX_ANN_CS ; private
     logical :: initialized = .false. !< If true, the module has been initialized.
-    logical :: thickness_flux_ann  !< If true, use thickness fluxes are computed using ANN.
+    logical :: use_thickness_flux_ann  !< If true, use thickness fluxes are computed using ANN.
     logical :: debug !< if true, write verbose checksums for debugging purposes. 
 
     type(ann_cs) :: ann_cs !< ANN control structure.
@@ -84,7 +84,7 @@ end subroutine thickness_flux_ann
 
 !> Calculates the parameterized thickness fluxes for use in the continuity equation.
 !> Returns the fluxes at the u,v points.
-subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
+subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, dt, G, GV, US, CS)
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
@@ -94,16 +94,17 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(out)   :: uhTrANN   !< Zonal ANN h transport u*h*dy [L2 H T-1 ~> m3 s-1 or kg s-1]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(out)   :: vhTrANN   !< Meridional ANN h transport v*h*dx [L2 H T-1 ~> m3 s-1 or kg s-1]
   type(thickness_flux_ann_CS),                intent(inout) :: CS !< Control structure for thickness_flux_ann
-
+  real,                                       intent(in)    :: dt     !< Time increment [T ~> s]
   ! Local variables
   integer :: i, j, k, is, ie, js, je, nz, shift
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dhdx, dhdy
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudx, dudy
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dvdx, dvdy
   
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: FxC, FyC
 
   real, dimension(2) :: y
-  real, dimension(2) :: x !To-Do: make this adjustable
+  real, dimension(2) :: x !To-Do: make this adjustable based on window size.
 
   integer :: shift
 
@@ -247,7 +248,7 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag,CS)
 
     ! Read all relevant parameters and write them to the model log.
     call log_version(param_file, mdl, version, "")
-    call get_param(param_file, mdl, "thickness_flux_ann", CS%thickness_flux_ann, &
+    call get_param(param_file, mdl, "THICKNESS_FLUX_ANN", CS%thickness_flux_ann, &
                        "If true, turns on the thickness flux ANN scheme", default=.false.)
 
     call get_param(param_file, mdl, "ann_coeff", CS%ann_coeff, &

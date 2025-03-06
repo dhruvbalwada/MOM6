@@ -131,6 +131,10 @@ use MOM_sum_output,            only : sum_output_CS
 use MOM_ALE_sponge,            only : init_ALE_sponge_diags, ALE_sponge_CS
 use MOM_thickness_diffuse,     only : thickness_diffuse, thickness_diffuse_init
 use MOM_thickness_diffuse,     only : thickness_diffuse_end, thickness_diffuse_CS
+! DB <
+use MOM_thickness_flux_ann,    only : thickness_flux_ann, thickness_flux_ann_init
+use MOM_thickness_flux_ann,    only : thickness_flux_ann_end, thickness_flux_ann_CS 
+! DB >
 use MOM_tracer_advect,         only : advect_tracer, tracer_advect_init
 use MOM_tracer_advect,         only : tracer_advect_end, tracer_advect_CS
 use MOM_tracer_hor_diff,       only : tracer_hordiff, tracer_hor_diff_init
@@ -301,6 +305,9 @@ type, public :: MOM_control_struct ; private
   logical :: interface_filter        !< If true, apply an interface height filter immediately
                                      !! after any calls to thickness_diffuse.
   logical :: thickness_diffuse       !< If true, diffuse interface height w/ a diffusivity KHTH.
+  ! DB <
+  logical :: thickness_flux_ann  !< If true, use the thickness flux ANN
+  ! DB >
   logical :: thickness_diffuse_first !< If true, diffuse thickness before dynamics.
   logical :: mixedlayer_restrat      !< If true, use submesoscale mixed layer restratifying scheme.
   logical :: useMEKE                 !< If true, call the MEKE parameterization.
@@ -398,6 +405,10 @@ type, public :: MOM_control_struct ; private
   type(thickness_diffuse_CS) :: thickness_diffuse_CSp
     !< Pointer to the control structure used for the isopycnal height diffusive transport.
     !! This is also common referred to as Gent-McWilliams diffusion
+  ! DB <
+  type(thickness_flux_ann_CS) :: thickness_flux_ann_CSp
+    !< Pointer to the control structure used for the thickness flux ANN
+  ! DB >
   type(interface_filter_CS) :: interface_filter_CSp
     !< Control structure used for the interface height smoothing operator.
   type(mixedlayer_restrat_CS) :: mixedlayer_restrat_CSp
@@ -1290,6 +1301,8 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
                   CS%eta_av_bc, G, GV, US, CS%dyn_split_RK2_CSp, calc_dtbt, CS%VarMix, &
                   CS%MEKE, CS%thickness_diffuse_CSp, CS%pbv, waves=waves)
     endif
+    ! DB < TODO: Do we need to tell the above function calls about thickness flux ann? 
+    
     if (showCallTree) call callTree_waypoint("finished step_MOM_dyn_split (step_MOM)")
 
   elseif (CS%do_dynamics) then ! ------------------------------------ not SPLIT
@@ -1349,6 +1362,13 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
     enddo; enddo
   endif
 
+  ! DB <
+  if (CS%thickness_flux_ann .and. .not.CS%thickness_diffuse_first ) then
+    call thickness_flux_ann(h, u, v, CS%uhtr, CS%vhtr, dt, G, GV, US, CS%thickness_flux_ann_CSp)
+    ! TO-DO: What does this pass_var do? 
+    ! call pass_var(h, G%Domain, clock=id_clock_pass, halo=max(2,CS%thick_ann_stencil))
+  endif
+  ! DB >
 
   if ((CS%thickness_diffuse .or. CS%interface_filter) .and. &
       .not.CS%thickness_diffuse_first) then
@@ -2347,6 +2367,10 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
   call get_param(param_file, "MOM", "THICKNESSDIFFUSE", CS%thickness_diffuse, &
                  "If true, isopycnal surfaces are diffused with a Laplacian "//&
                  "coefficient of KHTH.", default=.false.)
+  ! DB <
+  call get_param(param_file, "MOM", "THICKNESS_FLUX_ANN", CS%thickness_flux_ann, &
+                 "If true, use the thickness flux ann:", default=.false.)
+  ! DB >
   call get_param(param_file, "MOM", "APPLY_INTERFACE_FILTER", CS%interface_filter, &
                  "If true, model interface heights are subjected to a grid-scale "//&
                  "dependent spatial smoothing, often with biharmonic filter.", default=.false.)
@@ -3302,6 +3326,9 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
   if (CS%interface_filter) &
     call interface_filter_init(Time, G, GV, US, param_file, diag, CS%CDp, CS%interface_filter_CSp)
 
+  ! DB < 
+  call thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS%thickness_flux_ann_CSp)
+  ! DB >
   new_sim = is_new_run(restart_CSp)
   if (use_temperature) then
     CS%use_stochastic_EOS = MOM_stoch_eos_init(Time, G, GV, US, param_file, diag, CS%stoch_eos_CS, restart_CSp)
@@ -4299,6 +4326,10 @@ subroutine MOM_end(CS)
   call VarMix_end(CS%VarMix)
   call set_visc_end(CS%visc, CS%set_visc_CSp)
   call MEKE_end(CS%MEKE)
+
+  ! DB <
+  call thickness_flux_ann_end(CS%thickness_flux_ann_CSp)
+  ! DB >
 
   if (associated(CS%tv%internal_heat)) deallocate(CS%tv%internal_heat)
   if (associated(CS%tv%TempxPmE)) deallocate(CS%tv%TempxPmE)
