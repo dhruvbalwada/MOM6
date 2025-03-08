@@ -88,7 +88,7 @@ subroutine thickness_flux_ann(h, u, v, uhtr, vhtr, dt, G, GV, US, CS)
       if (h(i,j,k) < GV%Angstrom_H) h(i,j,k) = GV%Angstrom_H
     enddo ; enddo
   enddo
-  write (*,*) "here at last", uhTrANN(4,4,1), uhTrANN(4,4,2)
+  !write (*,*) "here at last", uhTrANN(4,4,1), uhTrANN(4,4,2)
 
 end subroutine thickness_flux_ann
 
@@ -144,10 +144,10 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   
   !> Interpolate fluxes to u, v points
     do j=js,je ; do i=is-1,ie
-      uhTrANN(I,j,k) = 0.5 * (FxC(i,j,k) + FxC(i+1,j,k)) * G%dyCu(I,j) * G%OBCmaskCu(I,j)
+      uhTrANN(I,j,k) = 0.5 * (FxC(i,j,k) + FxC(i+1,j,k)) * G%dyCu(I,j) !* G%OBCmaskCu(I,j)
     enddo ; enddo
     do j=js-1,je ; do i=is,ie
-      vhTrANN(i,J,k) = 0.5 * (FyC(i,j,k) + FyC(i,j+1,k)) * G%dxCv(i,J) * G%OBCmaskCv(i,J)
+      vhTrANN(i,J,k) = 0.5 * (FyC(i,j,k) + FyC(i,j+1,k)) * G%dxCv(i,J) !* G%OBCmaskCv(i,J)
     enddo ; enddo
 
   !> Put any limiters that may be needed. 
