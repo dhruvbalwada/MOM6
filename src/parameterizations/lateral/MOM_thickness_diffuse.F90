@@ -21,6 +21,10 @@ use MOM_MEKE_types,            only : MEKE_type
 use MOM_unit_scaling,          only : unit_scale_type
 use MOM_variables,             only : thermo_var_ptrs, cont_diag_ptrs
 use MOM_verticalGrid,          only : verticalGrid_type
+! DB <
+use MOM_thickness_flux_ann,    only : thickness_flux_ann, thickness_flux_ann_init, thickness_flux_ann_full
+use MOM_thickness_flux_ann,    only : thickness_flux_ann_end, thickness_flux_ann_CS
+! DB >
 implicit none ; private
 
 #include <MOM_memory.h>
@@ -112,6 +116,11 @@ type, public :: thickness_diffuse_CS ; private
   real, allocatable :: KH_v_GME(:,:,:)  !< Isopycnal height diffusivities in v-columns [L2 T-1 ~> m2 s-1]
   real, allocatable :: khth2d(:,:)      !< 2D isopycnal height diffusivity at h-points [L2 T-1 ~> m2 s-1]
 
+  ! DB < 
+  logical :: use_thickness_flux_ann
+  type(thickness_flux_ann_CS) :: thickness_flux_ann_CSp !< Pointer to the control structure used for the thickness flux ANN
+  ! DB >
+
   !>@{
   !! Diagnostic identifier
   integer :: id_uhGM    = -1, id_vhGM    = -1, id_GMwork = -1
@@ -127,7 +136,10 @@ contains
 !> Calculates isopycnal height diffusion coefficients and applies isopycnal height diffusion
 !! by modifying to the layer thicknesses, h. Diffusivities are limited to ensure stability.
 !! Also returns along-layer mass fluxes used in the continuity equation.
-subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp, CS)
+! DB <
+subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp, CS, u, v)
+!subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp, CS)
+! DB >
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
@@ -142,11 +154,20 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   type(VarMix_CS), target,                    intent(in)    :: VarMix !< Variable mixing coefficients
   type(cont_diag_ptrs),                       intent(inout) :: CDp    !< Diagnostics for the continuity equation
   type(thickness_diffuse_CS),                 intent(inout) :: CS     !< Control structure for thickness_diffuse
+  ! DB <
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(in)    :: u !< Zonal velocity
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(in)    :: v !< Meridional velocity
+  ! DB >
   ! Local variables
   real :: e(SZI_(G),SZJ_(G),SZK_(GV)+1) ! heights of interfaces, relative to mean
                                          ! sea level [Z ~> m], positive up.
   real :: uhD(SZIB_(G),SZJ_(G),SZK_(GV)) ! Diffusive u*h fluxes [L2 H T-1 ~> m3 s-1 or kg s-1]
   real :: vhD(SZI_(G),SZJB_(G),SZK_(GV)) ! Diffusive v*h fluxes [L2 H T-1 ~> m3 s-1 or kg s-1]
+
+  ! DB < 
+  real :: uhTrANN(SZIB_(G),SZJ_(G),SZK_(GV)) ! ANN u*h*dy transport [L2 H T-1 ~> m3 s-1 or kg s-1]
+  real :: vhTrANN(SZI_(G),SZJB_(G),SZK_(GV)) ! ANN v*h*dx transport [L2 H T-1 ~> m3 s-1 or kg s-1]
+  ! DB >
 
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1) :: &
     KH_u, &       ! Isopycnal height diffusivities in u-columns [L2 T-1 ~> m2 s-1]
@@ -492,6 +513,15 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
     call thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                 int_slope_u, int_slope_v)
   endif
+
+  ! DB <
+  ! Calculate the uh and vh transport using ANN, and add them with diffusive transports. 
+  if (CS%use_thickness_flux_ann) then
+    !call thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS%thickness_flux_ann_CSp)
+    uhD(:,:,:) = uhD(:,:,:) +  uhTrANN(:,:,:)
+    vhD(:,:,:) = vhD(:,:,:) +  vhTrANN(:,:,:)
+  endif 
+  ! DB >
 
   if (VarMix%use_variable_mixing) then
     if (allocated(MEKE%Rd_dx_h) .and. allocated(VarMix%Rd_dx_h)) then
@@ -2321,6 +2351,13 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
     allocate(CS%KH_u_GME(G%IsdB:G%IedB, G%jsd:G%jed, GV%ke+1), source=0.)
     allocate(CS%KH_v_GME(G%isd:G%ied, G%JsdB:G%JedB, GV%ke+1), source=0.)
   endif
+
+  ! DB <
+  call get_param(param_file, "MOM", "THICKNESS_FLUX_ANN", CS%use_thickness_flux_ann, &
+                 "If true, use the thickness flux ann.", default=.false.)
+  if (CS%use_thickness_flux_ann) &
+    call thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS%thickness_flux_ann_CSp)
+  ! DB >
 
   CS%id_uhGM = register_diag_field('ocean_model', 'uhGM', diag%axesCuL, Time, &
            'Time Mean Diffusive Zonal Thickness Flux', &

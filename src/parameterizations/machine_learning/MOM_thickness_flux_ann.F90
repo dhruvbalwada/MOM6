@@ -16,12 +16,12 @@ implicit none ; private
 
 #include <MOM_memory.h>
 
-public thickness_flux_ann, thickness_flux_ann_init, thickness_flux_ann_end
+public thickness_flux_ann, thickness_flux_ann_init, thickness_flux_ann_end, thickness_flux_ann_full
 
 !> Control structure/type for thickness flux ANN
 type, public :: THICKNESS_FLUX_ANN_CS ; private
   logical :: initialized = .false. !< If true, the module has been initialized.
-  logical :: thickness_flux_ann  !< If true, use thickness fluxes are computed using ANN.
+  !logical :: thickness_flux_ann  !< If true, use thickness fluxes are computed using ANN.
   logical :: debug !< if true, write verbose checksums for debugging purposes. 
 
   type(ann_cs) :: ann_cs !< ANN control structure.
@@ -122,11 +122,15 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   ! done as (ann_window-1)/2 as integer
   shift = (CS%ann_window-1)/2
 
+  uhTrANN(:,:,:) = 0.0
+  vhTrANN(:,:,:) = 0.0
+
   !> Calculates the h and u gradients in full 3D domain
   call h_gradients(h, G, GV, dhdx, dhdy, CS)
   call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
   
-  do k=2, nz
+  !do k=1, nz
+  do k=1, nz
   !> Rotation, local normalize etc
 
   !> Calculate the fluxes at center points 
@@ -138,16 +142,16 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
 
       !write (*,*) "i,j,k:", i, j,k, ", x,y", x, y
       
-      FxC(i,j,k) = y(1) * CS%ann_coeff
-      FyC(i,j,k) = y(2) * CS%ann_coeff
+      FxC(i,j,k) = y(1) 
+      FyC(i,j,k) = y(2) 
     enddo ; enddo
   
   !> Interpolate fluxes to u, v points
     do j=js,je ; do i=is-1,ie
-      uhTrANN(I,j,k) = 0.5 * (FxC(i,j,k) + FxC(i+1,j,k)) * G%dyCu(I,j) !* G%OBCmaskCu(I,j)
+      uhTrANN(I,j,k) = 0.5 * (FxC(i,j,k) + FxC(i+1,j,k)) * G%dyCu(I,j) * G%OBCmaskCu(I,j) * CS%ann_coeff
     enddo ; enddo
     do j=js-1,je ; do i=is,ie
-      vhTrANN(i,J,k) = 0.5 * (FyC(i,j,k) + FyC(i,j+1,k)) * G%dxCv(i,J) !* G%OBCmaskCv(i,J)
+      vhTrANN(i,J,k) = 0.5 * (FyC(i,j,k) + FyC(i,j+1,k)) * G%dxCv(i,J) * G%OBCmaskCv(i,J) * CS%ann_coeff
     enddo ; enddo
 
   !> Put any limiters that may be needed. 
@@ -253,7 +257,7 @@ end subroutine vel_gradients
 
 !> Init function
 ! Read parameters and register output fields.
-subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag,CS)
+subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
   type(time_type),         intent(in) :: Time    !< Current model time
   type(ocean_grid_type),   intent(in) :: G       !< Ocean grid structure
   type(verticalGrid_type), intent(in) :: GV      !< Vertical grid structure
@@ -271,9 +275,8 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag,CS)
 
   ! Read all relevant parameters and write them to the model log.
   call log_version(param_file, mdl, version, "")
-  call get_param(param_file, mdl, "THICKNESS_FLUX_ANN", CS%thickness_flux_ann, &
-                      "If true, turns on the thickness flux ANN scheme", default=.false.)
-
+  !call get_param(param_file, mdl, "THICKNESS_FLUX_ANN", CS%thickness_flux_ann, &
+  !                    "If true, turns on the thickness flux ANN scheme", default=.false.)
   call get_param(param_file, mdl, "thickness_flux_ann_coeff", CS%ann_coeff, &
                       "Coefficient to multiply the thickness flux ANN output by", default=1.0, units="nondim")
   call get_param(param_file, mdl, "thickness_flux_ann_window", CS%ann_window, &

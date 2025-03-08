@@ -132,8 +132,8 @@ use MOM_ALE_sponge,            only : init_ALE_sponge_diags, ALE_sponge_CS
 use MOM_thickness_diffuse,     only : thickness_diffuse, thickness_diffuse_init
 use MOM_thickness_diffuse,     only : thickness_diffuse_end, thickness_diffuse_CS
 ! DB <
-use MOM_thickness_flux_ann,    only : thickness_flux_ann, thickness_flux_ann_init
-use MOM_thickness_flux_ann,    only : thickness_flux_ann_end, thickness_flux_ann_CS 
+!use MOM_thickness_flux_ann,    only : thickness_flux_ann, thickness_flux_ann_init
+!use MOM_thickness_flux_ann,    only : thickness_flux_ann_end, thickness_flux_ann_CS 
 ! DB >
 use MOM_tracer_advect,         only : advect_tracer, tracer_advect_init
 use MOM_tracer_advect,         only : tracer_advect_end, tracer_advect_CS
@@ -306,7 +306,7 @@ type, public :: MOM_control_struct ; private
                                      !! after any calls to thickness_diffuse.
   logical :: thickness_diffuse       !< If true, diffuse interface height w/ a diffusivity KHTH.
   ! DB <
-  logical :: thickness_flux_ann  !< If true, use the thickness flux ANN
+  !logical :: thickness_flux_ann  !< If true, use the thickness flux ANN
   ! DB >
   logical :: thickness_diffuse_first !< If true, diffuse thickness before dynamics.
   logical :: mixedlayer_restrat      !< If true, use submesoscale mixed layer restratifying scheme.
@@ -406,7 +406,7 @@ type, public :: MOM_control_struct ; private
     !< Pointer to the control structure used for the isopycnal height diffusive transport.
     !! This is also common referred to as Gent-McWilliams diffusion
   ! DB <
-  type(thickness_flux_ann_CS) :: thickness_flux_ann_CSp
+  !type(thickness_flux_ann_CS) :: thickness_flux_ann_CSp
     !< Pointer to the control structure used for the thickness flux ANN
   ! DB >
   type(interface_filter_CS) :: interface_filter_CSp
@@ -490,7 +490,7 @@ integer :: id_clock_continuity  ! also in dynamics s/r
 integer :: id_clock_thick_diff
 integer :: id_clock_int_filter
 ! DB <
-integer :: id_clock_thick_flux_ann
+!integer :: id_clock_thick_flux_ann
 ! DB >
 integer :: id_clock_BBL_visc
 integer :: id_clock_ml_restrat
@@ -1223,8 +1223,12 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
       call cpu_clock_begin(id_clock_thick_diff)
       if (CS%VarMix%use_variable_mixing) &
         call calc_slope_functions(h, CS%tv, dt, G, GV, US, CS%VarMix, OBC=CS%OBC)
+      ! DB <
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt_thermo, G, GV, US, &
-                             CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp)
+                             CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp, u, v)
+      !call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt_thermo, G, GV, US, &
+      !                       CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp)
+      ! DB>
       call cpu_clock_end(id_clock_thick_diff)
       call pass_var(h, G%Domain, clock=id_clock_pass, halo=max(2,CS%cont_stencil))
       if (showCallTree) call callTree_waypoint("finished thickness_diffuse_first (step_MOM)")
@@ -1366,13 +1370,13 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
   endif
 
   ! DB <
-  if (CS%thickness_flux_ann .and. .not.CS%thickness_diffuse_first ) then
-    call cpu_clock_begin(id_clock_thick_flux_ann)
-    call thickness_flux_ann(h, u, v, CS%uhtr, CS%vhtr, dt, G, GV, US, CS%thickness_flux_ann_CSp)
-    call cpu_clock_end(id_clock_thick_flux_ann)
+  !if (CS%thickness_flux_ann .and. .not.CS%thickness_diffuse_first ) then
+  !  call cpu_clock_begin(id_clock_thick_flux_ann)
+  !  call thickness_flux_ann(h, u, v, CS%uhtr, CS%vhtr, dt, G, GV, US, CS%thickness_flux_ann_CSp)
+  !  call cpu_clock_end(id_clock_thick_flux_ann)
     ! TO-DO: What does this pass_var do? 
     ! call pass_var(h, G%Domain, clock=id_clock_pass, halo=max(2,CS%thick_ann_stencil))
-  endif
+  !endif
   ! DB >
 
   if ((CS%thickness_diffuse .or. CS%interface_filter) .and. &
@@ -1384,9 +1388,12 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
       call cpu_clock_begin(id_clock_thick_diff)
       if (CS%VarMix%use_variable_mixing) &
         call calc_slope_functions(h, CS%tv, dt, G, GV, US, CS%VarMix, OBC=CS%OBC)
+      ! DB <
       call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt, G, GV, US, &
-                             CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp)
-
+                             CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp, u, v)
+      !call thickness_diffuse(h, CS%uhtr, CS%vhtr, CS%tv, dt, G, GV, US, &
+      !                       CS%MEKE, CS%VarMix, CS%CDp, CS%thickness_diffuse_CSp)
+      ! DB >
       if (CS%debug) call hchksum(h,"Post-thickness_diffuse h", G%HI, haloshift=1, unscale=GV%H_to_MKS)
       call cpu_clock_end(id_clock_thick_diff)
       call pass_var(h, G%Domain, clock=id_clock_pass, halo=max(2,CS%cont_stencil))
@@ -2373,8 +2380,8 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
                  "If true, isopycnal surfaces are diffused with a Laplacian "//&
                  "coefficient of KHTH.", default=.false.)
   ! DB <
-  call get_param(param_file, "MOM", "THICKNESS_FLUX_ANN", CS%thickness_flux_ann, &
-                 "If true, use the thickness flux ann:", default=.false.)
+  !call get_param(param_file, "MOM", "THICKNESS_FLUX_ANN", CS%thickness_flux_ann, &
+  !               "If true, use the thickness flux ann:", default=.false.)
   ! DB >
   call get_param(param_file, "MOM", "APPLY_INTERFACE_FILTER", CS%interface_filter, &
                  "If true, model interface heights are subjected to a grid-scale "//&
@@ -3332,8 +3339,8 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
     call interface_filter_init(Time, G, GV, US, param_file, diag, CS%CDp, CS%interface_filter_CSp)
 
   ! DB < 
-  if (CS%thickness_flux_ann) &
-    call thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS%thickness_flux_ann_CSp)
+  !if (CS%thickness_flux_ann) &
+  !  call thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS%thickness_flux_ann_CSp)
   ! DB >
 
   new_sim = is_new_run(restart_CSp)
@@ -3637,8 +3644,8 @@ subroutine MOM_timing_init(CS)
   if (CS%interface_filter) &
     id_clock_int_filter = cpu_clock_id('(Ocean interface height filter *)', grain=CLOCK_MODULE)
   ! DB < 
-  if (CS%thickness_flux_ann) &
-    id_clock_thick_flux_ann = cpu_clock_id('(Ocean thickness flux ann *)', grain=CLOCK_MODULE)
+  !if (CS%thickness_flux_ann) &
+  !  id_clock_thick_flux_ann = cpu_clock_id('(Ocean thickness flux ann *)', grain=CLOCK_MODULE)
   ! DB >
  !if (CS%mixedlayer_restrat) &
     id_clock_ml_restrat = cpu_clock_id('(Ocean mixed layer restrat)', grain=CLOCK_MODULE)
@@ -4339,7 +4346,7 @@ subroutine MOM_end(CS)
   call MEKE_end(CS%MEKE)
 
   ! DB <
-  call thickness_flux_ann_end(CS%thickness_flux_ann_CSp)
+  !call thickness_flux_ann_end(CS%thickness_flux_ann_CSp)
   ! DB >
 
   if (associated(CS%tv%internal_heat)) deallocate(CS%tv%internal_heat)
