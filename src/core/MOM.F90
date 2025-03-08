@@ -489,6 +489,9 @@ integer :: id_clock_adiabatic
 integer :: id_clock_continuity  ! also in dynamics s/r
 integer :: id_clock_thick_diff
 integer :: id_clock_int_filter
+! DB <
+integer :: id_clock_thick_flux_ann
+! DB >
 integer :: id_clock_BBL_visc
 integer :: id_clock_ml_restrat
 integer :: id_clock_diagnostics
@@ -1364,7 +1367,9 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
 
   ! DB <
   if (CS%thickness_flux_ann .and. .not.CS%thickness_diffuse_first ) then
+    call cpu_clock_begin(id_clock_thick_flux_ann)
     call thickness_flux_ann(h, u, v, CS%uhtr, CS%vhtr, dt, G, GV, US, CS%thickness_flux_ann_CSp)
+    call cpu_clock_end(id_clock_thick_flux_ann)
     ! TO-DO: What does this pass_var do? 
     ! call pass_var(h, G%Domain, clock=id_clock_pass, halo=max(2,CS%thick_ann_stencil))
   endif
@@ -3327,8 +3332,10 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
     call interface_filter_init(Time, G, GV, US, param_file, diag, CS%CDp, CS%interface_filter_CSp)
 
   ! DB < 
-  call thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS%thickness_flux_ann_CSp)
+  if (CS%thickness_flux_ann) &
+    call thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS%thickness_flux_ann_CSp)
   ! DB >
+
   new_sim = is_new_run(restart_CSp)
   if (use_temperature) then
     CS%use_stochastic_EOS = MOM_stoch_eos_init(Time, G, GV, US, param_file, diag, CS%stoch_eos_CS, restart_CSp)
@@ -3629,6 +3636,10 @@ subroutine MOM_timing_init(CS)
     id_clock_thick_diff = cpu_clock_id('(Ocean thickness diffusion *)', grain=CLOCK_MODULE)
   if (CS%interface_filter) &
     id_clock_int_filter = cpu_clock_id('(Ocean interface height filter *)', grain=CLOCK_MODULE)
+  ! DB < 
+  if (CS%thickness_flux_ann) &
+    id_clock_thick_flux_ann = cpu_clock_id('(Ocean thickness flux ann *)', grain=CLOCK_MODULE)
+  ! DB >
  !if (CS%mixedlayer_restrat) &
     id_clock_ml_restrat = cpu_clock_id('(Ocean mixed layer restrat)', grain=CLOCK_MODULE)
   id_clock_diagnostics  = cpu_clock_id('(Ocean collective diagnostics)', grain=CLOCK_MODULE)

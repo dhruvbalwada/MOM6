@@ -50,10 +50,12 @@ contains
 !> Init function 
 ! Read parameters and register output fields.
 !subroutine ann_init(CS, use_ANN, param_file)
-subroutine ann_init(CS)
+subroutine ann_init(CS, num_layers, NNfile)
     type(ANN_CS), intent(inout) :: CS !< ANN control structure.
     !logical, intent(out) :: use_ANN !< If true, turns on ANN module.
     !type(param_file_type),   intent(in)    :: param_file !< Parameter file parser structure.
+    integer, intent(in) :: num_layers ! number of layers
+    character(len=200), intent(in) :: NNfile   
 
     integer :: i
     character(len=1) :: A = 'A'
@@ -61,8 +63,10 @@ subroutine ann_init(CS)
     character(len=1) :: layer_num_str
     character(len=3) :: matrix_name
     
+    CS%num_layers = num_layers
+    CS%NNfile = NNfile  
 
-#include "version_variable.h"
+    !#include "version_variable.h"
     !character(len=40) :: mdl = "MOM_ann"
 
     !call log_version(param_file, mdl, version, "")
@@ -84,7 +88,7 @@ subroutine ann_init(CS)
     allocate(CS%layer_sizes(CS%num_layers))
 
     call MOM_read_data(CS%NNfile,"layer_sizes",CS%layer_sizes)
-    !write (*,*) "layer sizes", CS%layer_sizes
+    write (*,*) "layer sizes", CS%layer_sizes
     !CS%layer_sizes = [2, 24, 24, 2]
 
     ! Read norms
@@ -117,7 +121,7 @@ subroutine ann_init(CS)
         call MOM_read_data(CS%NNfile, matrix_name, CS%layers(i)%A, &
                             (/1,1,1,1/),(/CS%layers(i)%output_width,CS%layers(i)%input_width,1,1/))
 
-        !write (*,*) "Reading", matrix_name, CS%layers(i)%A
+        write (*,*) "Reading", matrix_name, ":", CS%layers(i)%A
 
 
         allocate(CS%layers(i)%b(CS%layers(i)%output_width), source=0.)
@@ -248,3 +252,13 @@ end subroutine relu
 
 
 end module MOM_ann
+
+
+!> \namespace mom_ann
+!!
+!! \section section_ann ANN function for simple neural network
+!!
+!! This module contains the functions to implement a simple neural network
+!!
+!! It needs some data to be initialized, which is read from a netcdf file.
+!!  
