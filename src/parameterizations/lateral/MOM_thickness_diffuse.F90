@@ -517,7 +517,8 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   ! DB <
   ! Calculate the uh and vh transport using ANN, and add them with diffusive transports. 
   if (CS%use_thickness_flux_ann) then
-    !call thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS%thickness_flux_ann_CSp)
+    call thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS%thickness_flux_ann_CSp)
+    !write (*,*) uhTrANN(1,1,1), vhTrANN(1,1,1)
     uhD(:,:,:) = uhD(:,:,:) +  uhTrANN(:,:,:)
     vhD(:,:,:) = vhD(:,:,:) +  vhTrANN(:,:,:)
   endif 

@@ -34,7 +34,8 @@ type, public :: THICKNESS_FLUX_ANN_CS ; private
   type(diag_ctrl), pointer :: diag => NULL() !< structure used to regulate timing of diagnostics
 
   !! Diagnostic identifier
-  integer :: id_dhdx, id_dhdy, id_Fx, id_Fy
+  integer :: id_dhdx, id_dhdy, id_Fx, id_Fy, id_uhTrANN, id_vhTrANN
+
 end type THICKNESS_FLUX_ANN_CS
 
 contains 
@@ -134,7 +135,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   !> Rotation, local normalize etc
 
   !> Calculate the fluxes at center points 
-    do j=js,je ; do i=is,ie
+    do j=js-1,je ; do i=is-1,ie
       x(1) = dhdx(i,j,k)
       x(2) = dhdy(i,j,k)
       
@@ -142,24 +143,33 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
 
       !write (*,*) "i,j,k:", i, j,k, ", x,y", x, y
       
-      FxC(i,j,k) = y(1) 
-      FyC(i,j,k) = y(2) 
+      FxC(i,j,k) = y(1) * G%mask2dT(i,j) 
+      FyC(i,j,k) = y(2) * G%mask2dT(i,j)
     enddo ; enddo
   
   !> Interpolate fluxes to u, v points
     do j=js,je ; do i=is-1,ie
-      uhTrANN(I,j,k) = 0.5 * (FxC(i,j,k) + FxC(i+1,j,k)) * G%dyCu(I,j) * G%OBCmaskCu(I,j) * CS%ann_coeff
+      uhTrANN(I,j,k) = 0.5 * (FxC(i,j,k) + FxC(i+1,j,k)) * G%dyCu(I,j) * G%mask2dCu(I,j) * CS%ann_coeff
     enddo ; enddo
     do j=js-1,je ; do i=is,ie
-      vhTrANN(i,J,k) = 0.5 * (FyC(i,j,k) + FyC(i,j+1,k)) * G%dxCv(i,J) * G%OBCmaskCv(i,J) * CS%ann_coeff
+      vhTrANN(i,J,k) = 0.5 * (FyC(i,j,k) + FyC(i,j+1,k)) * G%dxCv(i,J) * G%mask2dCv(i,J) * CS%ann_coeff
     enddo ; enddo
 
   !> Put any limiters that may be needed. 
 
   enddo
 
+  !> Apply the no- BT flow condition
+  uhTrANN(:,:,1) = - uhTrANN(:,:,2) 
+  vhTrANN(:,:,1) = - vhTrANN(:,:,2) 
+
+
   if (CS%id_dhdx > 0) call post_data(CS%id_dhdx, dhdx, CS%diag)
   if (CS%id_dhdy > 0) call post_data(CS%id_dhdy, dhdy, CS%diag)
+  if (CS%id_Fx > 0) call post_data(CS%id_Fx, FxC, CS%diag)
+  if (CS%id_Fy > 0) call post_data(CS%id_Fy, FyC, CS%diag)
+  if (CS%id_uhTrANN > 0) call post_data(CS%id_uhTrANN, uhTrANN, CS%diag)
+  if (CS%id_vhTrANN > 0) call post_data(CS%id_vhTrANN, vhTrANN, CS%diag)
 
 end subroutine thickness_flux_ann_full
 
@@ -192,17 +202,17 @@ subroutine h_gradients(h, G, GV, dhdx, dhdy, CS)
     ! Calculate the x-gradients at u points
     ! I don't follow the MOM6 soft convention for loops (as it seemed a bit confusing with these shifts)
     do j=js-shift, je+shift ; do i=is-shift-1, ie+shift ! extra points needed in the x direction since we interpolate to center
-      dhdx_u(I,j,k) = G%IdxCu(i,j) * (h(i+1,j,k) - h(i,j,k)) 
+      dhdx_u(I,j,k) = G%IdxCu(i,j) * (h(i+1,j,k) - h(i,j,k)) * G%mask2dCu(I,j)
     enddo ; enddo
     ! Calculate the y-gradients at v points
     do j=js-shift-1, je+shift ; do i=is-shift, ie+shift ! extra points needed in the y direction since we interpolate to center
-      dhdy_v(i,J,k) = G%IdyCv(i,J) * (h(i,j+1,k) - h(i,j,k))
+      dhdy_v(i,J,k) = G%IdyCv(i,J) * (h(i,j+1,k) - h(i,j,k)) * G%mask2dCv(i,J)
     enddo ; enddo
     ! Interpolate the gradients to the center points
     ! We need these at +/- shift points because that is the local domain that the ANN will use.
     do j=js-shift, je+shift ; do i=is-shift, ie+shift      
-      dhdx(i,j,k) = 0.5 * (dhdx_u(I,j,k) + dhdx_u(I-1,j,k))
-      dhdy(i,j,k) = 0.5 * (dhdy_v(i,J,k) + dhdy_v(i,J-1,k))
+      dhdx(i,j,k) = 0.5 * (dhdx_u(I,j,k) + dhdx_u(I-1,j,k)) * G%mask2dT(i,j)
+      dhdy(i,j,k) = 0.5 * (dhdy_v(i,J,k) + dhdy_v(i,J-1,k)) * G%mask2dT(i,j)
     enddo ; enddo
   enddo ! end k loop
 
@@ -236,8 +246,9 @@ subroutine vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
     ! Copy code from MOM_hor_visc.F90
     ! Calculate some velocity gradients at center points directly
     do j=js-shift,je+shift ; do i=is-shift,ie+shift ! has halo 2 ! loops over c points
-      dudx(i,j,k) = G%IdxT(i,j)* (u(I,j,k)   - u(I-1,j,k)) !* G%mask2dT(i,j)
-      dvdy(i,j,k) = G%IdyT(i,j)* (v(i,J,k)   - v(i,J-1,k)) !* G%mask2dT(i,j)
+      dudx(i,j,k) = G%IdxT(i,j)* (u(I,j,k) * G%mask2dCu(I,j)   - u(I-1,j,k) * G%mask2dCu(I-1,j)) !* G%mask2dT(i,j)
+      dvdy(i,j,k) = G%IdyT(i,j)* (v(i,J,k) * G%mask2dCv(i,J)   - v(i,J-1,k) * G%mask2dCv(i,J-1)) !* G%mask2dT(i,j)
+      ! the above masking ensures no-flow condition. 
     enddo ; enddo
 
     ! Calculate velocity gradients at corner points 
@@ -245,6 +256,7 @@ subroutine vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
     do j=js-shift-1,je+shift ; do i=is-shift-1,ie+shift 
       dvdx_q(I,J,k) = G%IdxBu(I,J)*(v(i+1,J,k)  - v(i,J,k) ) !* G%mask2dBu(I,J)
       dudy_q(I,J,k) = G%IdyBu(I,J)*(u(I,j+1,k)  - u(I,j,k) ) !* G%mask2dBu(I,J)
+      ! 
     enddo ; enddo
 
     ! interpolate corner grads to center points 
@@ -291,11 +303,18 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
 
   ! Register diagnostics
   CS%id_dhdx = register_diag_field('ocean_model', 'dhdx', diag%axesTL, Time, &
-              'Horizontal h gradient in x direction', 'm/m', &
-              conversion=US%Z_to_L)
+              'Horizontal h gradient in x direction', 'm/m', conversion=US%Z_to_L)
   CS%id_dhdy = register_diag_field('ocean_model', 'dhdy', diag%axesTL, Time, &
-              'Horizontal h gradient in y direction', 'm/m', &
-              conversion=US%Z_to_L)
+              'Horizontal h gradient in y direction', 'm/m', conversion=US%Z_to_L)
+  CS%id_Fx = register_diag_field('ocean_model', 'Fx', diag%axesTL, Time, &
+              'ANN output in x direction', 'm2 s-1', conversion=US%L_to_m**2*US%s_to_T)
+  CS%id_Fy = register_diag_field('ocean_model', 'Fy', diag%axesTL, Time, &
+              'ANN output in y direction', 'm2 s-1', conversion=US%L_to_m**2*US%s_to_T)
+  CS%id_uhTrANN = register_diag_field('ocean_model', 'uhTrANN', diag%axesCuL, Time, &
+              'Zonal ANN h transport ~ u*h*dy', 'm3 s-1', conversion=US%L_to_m**3*US%s_to_T)
+  CS%id_vhTrANN = register_diag_field('ocean_model', 'vhTrANN', diag%axesCvL, Time, &
+              'Meridional ANN h transport ~ v*h*dx', 'm3 s-1', conversion=US%L_to_m**3*US%s_to_T)
+
 
 end subroutine thickness_flux_ann_init
 
