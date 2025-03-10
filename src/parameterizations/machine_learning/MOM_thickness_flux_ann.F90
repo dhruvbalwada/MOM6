@@ -160,8 +160,8 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   enddo
 
   !> Apply the no- BT flow condition (for 2 layers)
-  uhTrANN(:,:,1) = - uhTrANN(:,:,2) 
-  vhTrANN(:,:,1) = - vhTrANN(:,:,2) 
+  !uhTrANN(:,:,1) = - uhTrANN(:,:,2) 
+  !vhTrANN(:,:,1) = - vhTrANN(:,:,2) 
 
 
   if (CS%id_dhdx > 0) call post_data(CS%id_dhdx, dhdx, CS%diag)
@@ -245,24 +245,24 @@ subroutine vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
   do k=1, nz
     ! Copy code from MOM_hor_visc.F90
     ! Calculate some velocity gradients at center points directly
-    do j=js-shift,je+shift ; do i=is-shift,ie+shift ! has halo 2 ! loops over c points
-      dudx(i,j,k) = G%IdxT(i,j)* (u(I,j,k) * G%mask2dCu(I,j)   - u(I-1,j,k) * G%mask2dCu(I-1,j)) !* G%mask2dT(i,j)
-      dvdy(i,j,k) = G%IdyT(i,j)* (v(i,J,k) * G%mask2dCv(i,J)   - v(i,J-1,k) * G%mask2dCv(i,J-1)) !* G%mask2dT(i,j)
+    do j=js-shift-1,je+shift+1 ; do i=is-shift-1,ie+shift+1 ! has halo 2 ! loops over c points
+      dudx(i,j,k) = G%IdxT(i,j)* (u(I,j,k) * G%mask2dCu(I,j)   - u(I-1,j,k) * G%mask2dCu(I-1,j)) * G%mask2dT(i,j)
+      dvdy(i,j,k) = G%IdyT(i,j)* (v(i,J,k) * G%mask2dCv(i,J)   - v(i,J-1,k) * G%mask2dCv(i,J-1)) * G%mask2dT(i,j)
       ! the above masking ensures no-flow condition. 
     enddo ; enddo
 
     ! Calculate velocity gradients at corner points 
     ! loops over q points (we don't use the soft convention of MOM6 for do loop indices here)
-    do j=js-shift-1,je+shift ; do i=is-shift-1,ie+shift 
-      dvdx_q(I,J,k) = G%IdxBu(I,J)*(v(i+1,J,k)  - v(i,J,k) ) !* G%mask2dBu(I,J)
-      dudy_q(I,J,k) = G%IdyBu(I,J)*(u(I,j+1,k)  - u(I,j,k) ) !* G%mask2dBu(I,J)
+    do j=js-shift-2,je+shift+1 ; do i=is-shift-2,ie+shift+1
+      dvdx_q(I,J,k) = G%IdxBu(I,J)*(v(i+1,J,k)  - v(i,J,k) ) * G%mask2dBu(I,J)
+      dudy_q(I,J,k) = G%IdyBu(I,J)*(u(I,j+1,k)  - u(I,j,k) ) * G%mask2dBu(I,J)
       ! 
     enddo ; enddo
 
     ! interpolate corner grads to center points 
-    do j = js-shift, je+shift; do i = is-shift, ie+shift
-      dvdx(i,j,k) =  0.25 * (dvdx_q(I,J,k) + dvdx_q(I-1,J,k) + dvdx_q(I,J-1,k) + dvdx_q(I-1,J-1,k)) !* G%mask2dT(i,j) 
-      dudy(i,j,k) =  0.25 * (dudy_q(I,J,k) + dudy_q(I-1,J,k) + dudy_q(I,J-1,k) + dudy_q(I-1,J-1,k)) !* G%mask2dT(i,j) 
+    do j = js-shift-1, je+shift+1; do i = is-shift-1, ie+shift+1
+      dvdx(i,j,k) =  0.25 * (dvdx_q(I,J,k) + dvdx_q(I-1,J,k) + dvdx_q(I,J-1,k) + dvdx_q(I-1,J-1,k)) * G%mask2dT(i,j) 
+      dudy(i,j,k) =  0.25 * (dudy_q(I,J,k) + dudy_q(I-1,J,k) + dudy_q(I,J-1,k) + dudy_q(I-1,J-1,k)) * G%mask2dT(i,j) 
     enddo; enddo 
   enddo
 end subroutine vel_gradients
