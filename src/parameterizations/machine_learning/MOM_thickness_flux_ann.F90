@@ -135,7 +135,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   !> Rotation, local normalize etc
 
   !> Calculate the fluxes at center points 
-    do j=js-1,je ; do i=is-1,ie
+    do j=js-1,je+1 ; do i=is-1,ie+1
       x(1) = dhdx(i,j,k)
       x(2) = dhdy(i,j,k)
       
@@ -159,7 +159,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
 
   enddo
 
-  !> Apply the no- BT flow condition
+  !> Apply the no- BT flow condition (for 2 layers)
   uhTrANN(:,:,1) = - uhTrANN(:,:,2) 
   vhTrANN(:,:,1) = - vhTrANN(:,:,2) 
 
@@ -201,16 +201,16 @@ subroutine h_gradients(h, G, GV, dhdx, dhdy, CS)
   do k=1, nz
     ! Calculate the x-gradients at u points
     ! I don't follow the MOM6 soft convention for loops (as it seemed a bit confusing with these shifts)
-    do j=js-shift, je+shift ; do i=is-shift-1, ie+shift ! extra points needed in the x direction since we interpolate to center
+    do j=js-shift-1, je+shift+1 ; do i=is-shift-2, ie+shift+1 ! extra points needed in the x direction since we interpolate to center
       dhdx_u(I,j,k) = G%IdxCu(i,j) * (h(i+1,j,k) - h(i,j,k)) * G%mask2dCu(I,j)
     enddo ; enddo
     ! Calculate the y-gradients at v points
-    do j=js-shift-1, je+shift ; do i=is-shift, ie+shift ! extra points needed in the y direction since we interpolate to center
+    do j=js-shift-2, je+shift+1 ; do i=is-shift-1, ie+shift+1 ! extra points needed in the y direction since we interpolate to center
       dhdy_v(i,J,k) = G%IdyCv(i,J) * (h(i,j+1,k) - h(i,j,k)) * G%mask2dCv(i,J)
     enddo ; enddo
     ! Interpolate the gradients to the center points
     ! We need these at +/- shift points because that is the local domain that the ANN will use.
-    do j=js-shift, je+shift ; do i=is-shift, ie+shift      
+    do j=js-shift-1, je+shift+1 ; do i=is-shift-1, ie+shift+1
       dhdx(i,j,k) = 0.5 * (dhdx_u(I,j,k) + dhdx_u(I-1,j,k)) * G%mask2dT(i,j)
       dhdy(i,j,k) = 0.5 * (dhdy_v(i,J,k) + dhdy_v(i,J-1,k)) * G%mask2dT(i,j)
     enddo ; enddo
