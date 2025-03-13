@@ -22,7 +22,7 @@ use MOM_unit_scaling,          only : unit_scale_type
 use MOM_variables,             only : thermo_var_ptrs, cont_diag_ptrs
 use MOM_verticalGrid,          only : verticalGrid_type
 ! DB <
-use MOM_thickness_flux_ann,    only : thickness_flux_ann, thickness_flux_ann_init, thickness_flux_ann_full
+use MOM_thickness_flux_ann,    only : thickness_flux_ann_init, thickness_flux_ann_full
 use MOM_thickness_flux_ann,    only : thickness_flux_ann_end, thickness_flux_ann_CS
 ! DB >
 implicit none ; private
