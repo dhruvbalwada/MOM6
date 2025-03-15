@@ -27,7 +27,7 @@ type, public :: THICKNESS_FLUX_ANN_CS ; private
   type(ann_cs) :: ann_cs !< ANN control structure.
   integer :: thickness_ann_num_layers ! number of layers
   character(len=200) :: thickness_ann_NNfile   ! The name of netcdf file having neural network shape function
-  
+  character(len=200) :: thickness_ann_model_type ! The type of model to use for thickness fluxes
   real :: ann_coeff  !< Coefficient to multiply the ANN output by.
   integer :: ann_window  !< Number of horizontal grid points to use in the ANN window.
 
@@ -55,7 +55,8 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   type(thickness_flux_ann_CS),                intent(inout) :: CS !< Control structure for thickness_flux_ann
   ! Local variables
   integer :: i, j, k, is, ie, js, je, nz, shift, stencil_points, ii, jj
-
+  integer :: Nin ! number of input variable types to the ANN (will be multiplied by the window size later )
+  integer :: Nout = 2! number of output variable types from the ANN
   ! Variables for the gradients
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dhdx, dhdy
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudx, dudy
@@ -67,8 +68,9 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   ! Variables for the local stencil 
   real, allocatable :: dhdx_local(:,:), dhdy_local(:,:), dudx_local(:,:), dudy_local(:,:), dvdx_local(:,:), dvdy_local(:,:)
   real, allocatable :: x(:) !To-Do: make this adjustable based on window size.
-  real, dimension(2) :: y, y_rot
+  real, allocatable :: y(:), y_rot(:)
   real :: vel_grad_mag, h_grad_mag
+  real :: tol_vel_grad, tol_h_grad
 
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
   !Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
@@ -84,82 +86,129 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   ! Allocate the local stencil variables
   allocate(dhdx_local(stencil_points, stencil_points), dhdy_local(stencil_points, stencil_points), &
            dudx_local(stencil_points, stencil_points), dudy_local(stencil_points, stencil_points), &
-           dvdx_local(stencil_points, stencil_points), dvdy_local(stencil_points, stencil_points), &
-           x(stencil_points*6))
+           dvdx_local(stencil_points, stencil_points), dvdy_local(stencil_points, stencil_points))
+
+  if (CS%thickness_ann_model_type == "GM_ann" .or. CS%thickness_ann_model_type == "GM_rotated_ann") then
+    Nin = 2
+  else if (CS%thickness_ann_model_type == "nondim_ann") then
+    Nin = 6
+  endif
+
+  allocate(x(stencil_points*Nin), y(Nout), y_rot(Nout))
 
   !> Calculates the h and u gradients in full 3D domain
   call h_gradients(h, G, GV, dhdx, dhdy, CS)
   call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
+
+  tol_vel_grad = 1.0e-30 * US%T_to_s
+  tol_h_grad = 1.0e-30 * US%Z_to_m / US%L_to_m
   
   !do k=1, nz
   do k=1, nz
   !> Rotation, local normalize etc
-
-  !> Calculate the fluxes at center points 
+  !write(*,*) "k", k, shift, stencil_points
+    !> Calculate the fluxes at center points 
     do j=js-1,je+1 ; do i=is-1,ie+1
+
+      if (CS%thickness_ann_model_type == "GM_ann") then
       ! To test code with a simple GM function incorporated as ANN
-      !x(1) = dhdx(i,j,k)
-      !x(2) = dhdy(i,j,k)
+        x(1) = dhdx(i,j,k)
+        x(2) = dhdy(i,j,k)
+        call ann(x, y, CS%ann_cs)
+     
+      else if (CS%thickness_ann_model_type == "GM_rotated_ann") then 
+        ! To test code with a simple GM function incorporated in rotated form
+        dhdx_local(:,:) = dhdx(i-shift:i+shift,j-shift:j+shift,k)
+        dhdy_local(:,:) = dhdy(i-shift:i+shift,j-shift:j+shift,k)
 
-      ! Start : Code to work with specific ANN 
-      
-      ! Get the data on the local stencil
-      dhdx_local(:,:) = dhdx(i-shift:i+shift,j-shift:j+shift,k)
-      dhdy_local(:,:) = dhdy(i-shift:i+shift,j-shift:j+shift,k)
-      dudx_local(:,:) = dudx(i-shift:i+shift,j-shift:j+shift,k)
-      dudy_local(:,:) = dudy(i-shift:i+shift,j-shift:j+shift,k)
-      dvdx_local(:,:) = dvdx(i-shift:i+shift,j-shift:j+shift,k)
-      dvdy_local(:,:) = dvdy(i-shift:i+shift,j-shift:j+shift,k)
+        call rotate_all_inputs(CS%ann_window, dhdx_local, dhdy_local)
 
-      ! Rotation to grad h coordinates (always around center point)
-      call rotate_all_inputs(dhdx_local, dhdy_local, dudx_local, dudy_local, dvdx_local, dvdy_local, CS%ann_window)
-
-      ! Compute the magnitude of the velocity gradient tensor for the local stencil
-      
-      h_grad_mag = 0.0
-      vel_grad_mag = 0.0
-      do jj=1, CS%ann_window
-        do ii=1, CS%ann_window
-          h_grad_mag = h_grad_mag + dhdx_local(ii,jj)**2 + dhdy_local(ii,jj)**2
-          vel_grad_mag = vel_grad_mag + dudx_local(ii,jj)**2 + dvdx_local(ii,jj)**2 + dudy_local(ii,jj)**2 + dvdy_local(ii,jj)**2
+        ! Compute the magnitude of the velocity gradient tensor for the local stencil
+        
+        h_grad_mag = 0.0
+        do jj=1, CS%ann_window
+          do ii=1, CS%ann_window
+            h_grad_mag = h_grad_mag + dhdx_local(ii,jj)**2 + dhdy_local(ii,jj)**2
+          enddo
         enddo
-      enddo
-      h_grad_mag = sqrt(h_grad_mag)
-      vel_grad_mag = sqrt(vel_grad_mag)
+        h_grad_mag = sqrt(h_grad_mag) + tol_h_grad
+        !write(*,*) "h_grad_mag", h_grad_mag, "at i,j,k", i, j, k
+        
+        dhdx_local(:,:) = dhdx_local(:,:) / h_grad_mag
+        dhdy_local(:,:) = dhdy_local(:,:) / h_grad_mag
 
-      ! Normalize the local gradients
-      
-      dudx_local(:,:) = dudx_local(:,:) / vel_grad_mag
-      dudy_local(:,:) = dudy_local(:,:) / vel_grad_mag
-      dvdx_local(:,:) = dvdx_local(:,:) / vel_grad_mag
-      dvdy_local(:,:) = dvdy_local(:,:) / vel_grad_mag
-      
-      dhdx_local(:,:) = dhdx_local(:,:) / h_grad_mag
-      dhdy_local(:,:) = dhdy_local(:,:) / h_grad_mag
+        x(1:stencil_points)                    = RESHAPE(dhdx_local, (/stencil_points/))
+        x(stencil_points+1:2*stencil_points)   = RESHAPE(dhdy_local, (/stencil_points/))
+
+        call ann(x, y_rot, CS%ann_cs)
+
+        call rotate_outputs(dhdx(i,j,k), dhdy(i,j,k), y, y_rot)
+
+        y = y_rot * h_grad_mag
+        
+
+      else if (CS%thickness_ann_model_type == "nondim_ann") then
+        ! To test the code with non-dim ANN
+        ! Start : Code to work with specific ANN 
+        
+        ! Get the data on the local stencil
+        dhdx_local(:,:) = dhdx(i-shift:i+shift,j-shift:j+shift,k)
+        dhdy_local(:,:) = dhdy(i-shift:i+shift,j-shift:j+shift,k)
+        dudx_local(:,:) = dudx(i-shift:i+shift,j-shift:j+shift,k)
+        dudy_local(:,:) = dudy(i-shift:i+shift,j-shift:j+shift,k)
+        dvdx_local(:,:) = dvdx(i-shift:i+shift,j-shift:j+shift,k)
+        dvdy_local(:,:) = dvdy(i-shift:i+shift,j-shift:j+shift,k)
+
+        ! Rotation to grad h coordinates (always around center point)
+        call rotate_all_inputs(CS%ann_window, dhdx_local, dhdy_local, dudx_local, dudy_local, dvdx_local, dvdy_local)
+
+        ! Compute the magnitude of the velocity gradient tensor for the local stencil
+        
+        h_grad_mag = 0.0
+        vel_grad_mag = 0.0
+        do jj=1, CS%ann_window
+          do ii=1, CS%ann_window
+            h_grad_mag = h_grad_mag + dhdx_local(ii,jj)**2 + dhdy_local(ii,jj)**2
+            vel_grad_mag = vel_grad_mag + dudx_local(ii,jj)**2 + dvdx_local(ii,jj)**2 + dudy_local(ii,jj)**2 + dvdy_local(ii,jj)**2
+          enddo
+        enddo
+        h_grad_mag = sqrt(h_grad_mag) + tol_h_grad
+        vel_grad_mag = sqrt(vel_grad_mag) + tol_vel_grad
+
+        ! Non-dim the local gradients
+        
+        dudx_local(:,:) = dudx_local(:,:) / vel_grad_mag
+        dudy_local(:,:) = dudy_local(:,:) / vel_grad_mag
+        dvdx_local(:,:) = dvdx_local(:,:) / vel_grad_mag
+        dvdy_local(:,:) = dvdy_local(:,:) / vel_grad_mag
+        
+        dhdx_local(:,:) = dhdx_local(:,:) / h_grad_mag
+        dhdy_local(:,:) = dhdy_local(:,:) / h_grad_mag
 
 
-      ! General ANN with vel and h gradients as input, with stencils. 
-      ! On 12 March 2025, the data was arranged as following in X 
-      ! du/dx, dv/dx, du/dy, dv/dy, dh/dx, dh/dy
-      ! for each of these variables the arrangement is: 
-      x(1:stencil_points)                    = RESHAPE(dudx_local, (/stencil_points/))
-      x(stencil_points+1:2*stencil_points)   = RESHAPE(dvdx_local, (/stencil_points/))
-      x(2*stencil_points+1:3*stencil_points) = RESHAPE(dudy_local, (/stencil_points/))
-      x(3*stencil_points+1:4*stencil_points) = RESHAPE(dvdy_local, (/stencil_points/))
-      x(4*stencil_points+1:5*stencil_points) = RESHAPE(dhdx_local, (/stencil_points/))
-      x(5*stencil_points+1:6*stencil_points) = RESHAPE(dhdy_local, (/stencil_points/))
+        ! General ANN with vel and h gradients as input, with stencils. 
+        ! On 12 March 2025, the data was arranged as following in X 
+        ! du/dx, dv/dx, du/dy, dv/dy, dh/dx, dh/dy
+        ! for each of these variables the arrangement is: 
+        x(1:stencil_points)                    = RESHAPE(dudx_local, (/stencil_points/))
+        x(stencil_points+1:2*stencil_points)   = RESHAPE(dvdx_local, (/stencil_points/))
+        x(2*stencil_points+1:3*stencil_points) = RESHAPE(dudy_local, (/stencil_points/))
+        x(3*stencil_points+1:4*stencil_points) = RESHAPE(dvdy_local, (/stencil_points/))
+        x(4*stencil_points+1:5*stencil_points) = RESHAPE(dhdx_local, (/stencil_points/))
+        x(5*stencil_points+1:6*stencil_points) = RESHAPE(dhdy_local, (/stencil_points/))
 
-      call ann(x, y_rot, CS%ann_cs)    
+        call ann(x, y_rot, CS%ann_cs)    
 
-      ! Rotate back
-      call rotate_outputs(dhdx(i,j,k), dhdy(i,j,k), y, y_rot)
-      
-      ! End : Code to work with specific ANN
-
+        ! Rotate back
+        call rotate_outputs(dhdx(i,j,k), dhdy(i,j,k), y, y_rot)
+        
+        y(:) = y(:) * h_grad_mag * vel_grad_mag * G%areaT(i,j) 
+        ! End : Code to work with specific ANN
+      endif
       !write (*,*) "i,j,k:", i, j,k, ", x,y", x, y
       
-      FxC(i,j,k) = y(1) * G%mask2dT(i,j) * h_grad_mag * vel_grad_mag * G%areaT(i,j) 
-      FyC(i,j,k) = y(2) * G%mask2dT(i,j) * h_grad_mag * vel_grad_mag * G%areaT(i,j) 
+      FxC(i,j,k) = y(1) * G%mask2dT(i,j) 
+      FyC(i,j,k) = y(2) * G%mask2dT(i,j) 
     enddo ; enddo
   
   !> Interpolate fluxes to u, v points
@@ -205,7 +254,7 @@ subroutine rotate_outputs(dhdx, dhdy, Fvec_xy, Fvec_rot)
   frame_vec_x = dhdx
   frame_vec_y = dhdy
 
-  mag_frame_vec = sqrt(frame_vec_x**2 + frame_vec_y**2)
+  mag_frame_vec = sqrt(frame_vec_x**2 + frame_vec_y**2) + 1.0e-30
 
   T_hat_i = frame_vec_x / mag_frame_vec
   T_hat_j = frame_vec_y / mag_frame_vec
@@ -224,10 +273,10 @@ subroutine rotate_outputs(dhdx, dhdy, Fvec_xy, Fvec_rot)
 end subroutine rotate_outputs
 
 ! > Rotates the inputs into the flow dependent coordiante frame. 
-subroutine rotate_all_inputs(dhdx, dhdy, dudx, dudy, dvdx, dvdy, stencil_width)
+subroutine rotate_all_inputs(stencil_width, dhdx, dhdy, dudx, dudy, dvdx, dvdy)
   integer, intent(in) :: stencil_width
-  real, dimension(stencil_width, stencil_width), intent(inout) :: dhdx, dhdy, dudx, dudy, dvdx, dvdy
-  
+  real, dimension(stencil_width, stencil_width), intent(inout) :: dhdx, dhdy
+  real, dimension(stencil_width, stencil_width), optional, intent(inout) :: dudx, dudy, dvdx, dvdy
   real, dimension(stencil_width, stencil_width) :: dhdx_rot, dhdy_rot, dudx_rot, dudy_rot, dvdx_rot, dvdy_rot
   integer :: mid_point
   real :: frame_vec_x, frame_vec_y
@@ -242,7 +291,7 @@ subroutine rotate_all_inputs(dhdx, dhdy, dudx, dudy, dvdx, dvdy, stencil_width)
   frame_vec_x = dhdx(mid_point, mid_point)
   frame_vec_y = dhdy(mid_point, mid_point)
 
-  mag_frame_vec = sqrt(frame_vec_x**2 + frame_vec_y**2)
+  mag_frame_vec = sqrt(frame_vec_x**2 + frame_vec_y**2) + 1.0e-30
 
   T_hat_i = frame_vec_x / mag_frame_vec
   T_hat_j = frame_vec_y / mag_frame_vec
@@ -258,16 +307,20 @@ subroutine rotate_all_inputs(dhdx, dhdy, dudx, dudy, dvdx, dvdy, stencil_width)
   ! Rotate the gradients
   do j=1, stencil_width ; do i=1, stencil_width
     call rotate_vector(R_11, R_12, R_21, R_22, dhdx(i,j), dhdy(i,j), dhdx_rot(i,j), dhdy_rot(i,j))
-    call rotate_tensor(R_11, R_12, R_21, R_22, dudx(i,j), dudy(i,j), dvdx(i,j), dvdy(i,j), dudx_rot(i,j), dudy_rot(i,j), dvdx_rot(i,j), dvdy_rot(i,j))
+    if (present(dudx)) then
+      call rotate_tensor(R_11, R_12, R_21, R_22, dudx(i,j), dudy(i,j), dvdx(i,j), dvdy(i,j), dudx_rot(i,j), dudy_rot(i,j), dvdx_rot(i,j), dvdy_rot(i,j))
+    endif
   enddo ; enddo
 
   ! Copy the rotated gradients back
   dhdx(:,:) = dhdx_rot(:,:)
   dhdy(:,:) = dhdy_rot(:,:)
-  dudx(:,:) = dudx_rot(:,:)
-  dudy(:,:) = dudy_rot(:,:)
-  dvdx(:,:) = dvdx_rot(:,:)
-  dvdy(:,:) = dvdy_rot(:,:)
+  if (present(dudx)) then
+    dudx(:,:) = dudx_rot(:,:)
+    dudy(:,:) = dudy_rot(:,:)
+    dvdx(:,:) = dvdx_rot(:,:)
+    dvdy(:,:) = dvdy_rot(:,:)
+  endif
 
 end subroutine rotate_all_inputs
 
@@ -423,18 +476,21 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
 
   ! Read all relevant parameters and write them to the model log.
   call log_version(param_file, mdl, version, "")
+
+  ! Setup ann for thickness fluxes
   !call get_param(param_file, mdl, "THICKNESS_FLUX_ANN", CS%thickness_flux_ann, &
   !                    "If true, turns on the thickness flux ANN scheme", default=.false.)
   call get_param(param_file, mdl, "thickness_flux_ann_coeff", CS%ann_coeff, &
                       "Coefficient to multiply the thickness flux ANN output by", default=1.0, units="nondim")
   call get_param(param_file, mdl, "thickness_flux_ann_window", CS%ann_window, &
                         "Number of horizontal grid points to use in the thickness flux ANN window", default=3)
-
-  ! Setup ann for thickness fluxes
   call get_param(param_file, mdl, "thickness_flux_ann_num_layers", CS%thickness_ann_num_layers, &
                       "Number of ANN layers for thickness flux", default=4)
   call get_param(param_file, mdl, "thickness_flux_ann_params_file", CS%thickness_ann_NNfile, &
                       "Thickness_flux ANN parameters netcdf input", default="thickness_flux_ann_params.nc")
+  call get_param(param_file, mdl, "thickness_flux_model_type", CS%thickness_ann_model_type, &
+                      "Type of ANN model (e.g. options GM_ann, GM_rotated_ann, nondim_ann).", default="GM_ann")     
+
   call ann_init(CS%ann_cs, CS%thickness_ann_num_layers, CS%thickness_ann_NNfile)
 
   ! Register diagnostics
