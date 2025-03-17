@@ -30,6 +30,7 @@ type, public :: THICKNESS_FLUX_ANN_CS ; private
   character(len=200) :: thickness_ann_model_type ! The type of model to use for thickness fluxes
   real :: ann_coeff  !< Coefficient to multiply the ANN output by.
   integer :: ann_window  !< Number of horizontal grid points to use in the ANN window.
+  logical :: decompose_h_gradients !< If true, decompose the h gradients into steady and transient parts.
 
   type(diag_ctrl), pointer :: diag => NULL() !< structure used to regulate timing of diagnostics
 
@@ -61,6 +62,8 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dhdx, dhdy
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudx, dudy
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dvdx, dvdy
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: h_mask
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dhbardx, dhbardy
   
   ! Variables for the ANN output 
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: FxC, FyC
@@ -98,8 +101,14 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   allocate(x(stencil_points*Nin), y(Nout), y_rot(Nout))
 
   !> Calculates the h and u gradients in full 3D domain
-  call h_gradients(h, G, GV, dhdx, dhdy, CS)
   call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
+  call h_gradients(h, G, GV, dhdx, dhdy, CS)
+
+  if (CS%decompose_h_gradients) then
+    call calculate_h_mask(h, h_mask, G, GV, CS)
+    call decompose_h_gradients(dhdx, dhdy, dhbardx, dhbardy, h_mask, G, GV, CS)
+  endif
+  
 
   tol_vel_grad = 1.0e-30 * US%T_to_s
   tol_h_grad = 1.0e-30 * US%Z_to_m / US%L_to_m
@@ -432,6 +441,92 @@ subroutine h_gradients(h, G, GV, dhdx, dhdy, CS)
 
 end subroutine h_gradients
 
+!> Decompose the h gradient into a steady and transient part.
+!> The steady part is the part that is due to topography. 
+subroutine decompose_h_gradients(dhdx, dhdy, dhbardx, dhbardy, h_mask, G, GV, CS)
+  type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
+  type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(inout)    :: dhdx, dhdy !< components of the h gradients on the i,j points (cell-center)
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(out)   :: dhbardx, dhbardy !< components of the h gradients on the i,j points (cell-center)
+  type(thickness_flux_ann_CS), intent(in) :: CS !< Control structure for thickness_flux_ann
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(in) :: h_mask !< Mask based on the thickness
+
+  integer :: i, j, k, is, ie, js, je, nz, shift
+
+  real :: e_bottom(SZI_(G),SZJ_(G))
+  real :: de_bottomdx_u(SZIB_(G),SZJ_(G)), de_bottomdy_v(SZI_(G),SZJB_(G))
+  real :: de_bottomdx(SZI_(G),SZJ_(G)), de_bottomdy(SZI_(G),SZJ_(G))
+
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+
+  shift = (CS%ann_window-1)/2
+
+  do j=js-shift-2, je+shift+1 ; do i=is-shift-2, ie+shift+1
+    e_bottom(i,j) = - G%bathyT(i,j)
+  enddo ; enddo
+
+  ! Calculate the x-gradients at u points
+  do j=js-shift-1, je+shift+1 ; do i=is-shift-2, ie+shift+1 ! extra points needed in the x direction since we interpolate to center
+    de_bottomdx_u(I,j) = G%IdxCu(i,j) * (e_bottom(i+1,j) - e_bottom(i,j)) * G%mask2dCu(I,j)
+  enddo ; enddo
+  ! Calculate the y-gradients at v points
+  do j=js-shift-2, je+shift+1 ; do i=is-shift-1, ie+shift+1 ! extra points needed in the y direction since we interpolate to center
+    de_bottomdy_v(i,J) = G%IdyCv(i,J) * (e_bottom(i,j+1) - e_bottom(i,j)) * G%mask2dCv(i,J)
+  enddo ; enddo
+
+  ! Interpolate the gradients to the center points
+  ! We need these at +/- shift points because that is the local domain that the ANN will use.
+  do j=js-shift-1, je+shift+1 ; do i=is-shift-1, ie+shift+1
+    de_bottomdx(i,j) = 0.5 * (de_bottomdx_u(I,j) + de_bottomdx_u(I-1,j)) * G%mask2dT(i,j)
+    de_bottomdy(i,j) = 0.5 * (de_bottomdy_v(i,J) + de_bottomdy_v(i,J-1)) * G%mask2dT(i,j)
+  enddo ; enddo
+
+  do j=js-shift-1, je+shift+1 ; do i=is-shift-1, ie+shift+1
+    dhbardx(i,j,nz) =  - de_bottomdx(i,j) * h_mask(i,j,nz)
+    dhbardy(i,j,nz) =  - de_bottomdy(i,j) * h_mask(i,j,nz)
+  enddo ; enddo
+
+  do k = 1, nz-1 ! 
+    do j=js-shift-1, je+shift+1 ; do i=is-shift-1, ie+shift+1
+      dhbardx(i,j,k) =  - de_bottomdx(i,j) * (1 - h_mask(i,j,k+1)) * h_mask(i,j,nz)
+      dhbardy(i,j,k) =  - de_bottomdy(i,j) * (1 - h_mask(i,j,k+1)) * h_mask(i,j,nz)
+    enddo ; enddo
+  enddo
+
+  dhdx(:,:,:) = dhdx(:,:,:) - dhbardx(:,:,:)
+  dhdy(:,:,:) = dhdy(:,:,:) - dhbardy(:,:,:)
+
+end subroutine decompose_h_gradients
+
+!> Calculate a thickness based mask. 
+subroutine calculate_h_mask(h, h_mask, G, GV, CS)
+  type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
+  type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(in)   :: h      !< Layer thickness [H ~> m or kg m-2]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(out) :: h_mask !< Mask based on the thickness
+  type(thickness_flux_ann_CS), intent(in) :: CS !< Control structure for thickness_flux_ann
+
+  integer :: i, j, k, is, ie, js, je, nz, shift
+  real :: h_min
+
+  shift = (CS%ann_window-1)/2
+
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+
+  h_min = 1.0 
+  ! This is not a universal choice. 
+  ! We should have a better way to set this.
+  ! An example of better way may be to set this based on the thickness of the other layers in the column.
+
+  do k=1, nz
+    do j=js-shift-1, je+shift+1 ; do i=is-shift-1, ie+shift+1 ! We want these to run over same values as places where we compute fluxes. 
+      h_mask(i,j,k) = 1.0
+      if (h(i,j,k) < h_min) h_mask(i,j,k) = 0.0
+    enddo ; enddo
+  enddo
+
+end subroutine calculate_h_mask
+
 !> Calculates the velocity gradients at the center points in 3D.
 subroutine vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
   type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
@@ -503,8 +598,7 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
   call log_version(param_file, mdl, version, "")
 
   ! Setup ann for thickness fluxes
-  !call get_param(param_file, mdl, "THICKNESS_FLUX_ANN", CS%thickness_flux_ann, &
-  !                    "If true, turns on the thickness flux ANN scheme", default=.false.)
+  
   call get_param(param_file, mdl, "thickness_flux_ann_coeff", CS%ann_coeff, &
                       "Coefficient to multiply the thickness flux ANN output by", default=1.0, units="nondim")
   call get_param(param_file, mdl, "thickness_flux_ann_window", CS%ann_window, &
@@ -515,6 +609,8 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
                       "Thickness_flux ANN parameters netcdf input", default="thickness_flux_ann_params.nc")
   call get_param(param_file, mdl, "thickness_flux_model_type", CS%thickness_ann_model_type, &
                       "Type of ANN model (e.g. options GM_ann, GM_rotated_ann, nondim_ann).", default="GM_ann")     
+  call get_param(param_file, mdl, "decompose_h_gradients", CS%decompose_h_gradients, &
+                     "If true, decomposes h gradients into steady and transient parts", default=.false.)
 
   call ann_init(CS%ann_cs, CS%thickness_ann_num_layers, CS%thickness_ann_NNfile)
 
