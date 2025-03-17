@@ -35,11 +35,11 @@ type, public :: THICKNESS_FLUX_ANN_CS ; private
 
   !! Diagnostic identifier
   integer :: id_dhdx, id_dhdy, id_Fx, id_Fy, id_uhTrANN, id_vhTrANN
+  integer :: id_dudx, id_dudy, id_dvdx, id_dvdy
 
 end type THICKNESS_FLUX_ANN_CS
 
 contains 
-
 
 !> Calculates the parameterized thickness fluxes for use in the continuity equation.
 !> Returns the fluxes at the u,v points.
@@ -84,9 +84,9 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   vhTrANN(:,:,:) = 0.0
 
   ! Allocate the local stencil variables
-  allocate(dhdx_local(stencil_points, stencil_points), dhdy_local(stencil_points, stencil_points), &
-           dudx_local(stencil_points, stencil_points), dudy_local(stencil_points, stencil_points), &
-           dvdx_local(stencil_points, stencil_points), dvdy_local(stencil_points, stencil_points))
+  allocate(dhdx_local(CS%ann_window, CS%ann_window), dhdy_local(CS%ann_window, CS%ann_window), &
+           dudx_local(CS%ann_window, CS%ann_window), dudy_local(CS%ann_window, CS%ann_window), &
+           dvdx_local(CS%ann_window, CS%ann_window), dvdy_local(CS%ann_window, CS%ann_window))
 
   if (CS%thickness_ann_model_type == "GM_ann" .or. CS%thickness_ann_model_type == "GM_rotated_ann") then
     Nin = 2
@@ -111,7 +111,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
     do j=js-1,je+1 ; do i=is-1,ie+1
 
       if (CS%thickness_ann_model_type == "GM_ann") then
-      ! To test code with a simple GM function incorporated as ANN
+        ! To test code with a simple GM function incorporated as ANN
         x(1) = dhdx(i,j,k)
         x(2) = dhdy(i,j,k)
         call ann(x, y, CS%ann_cs)
@@ -142,15 +142,18 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
 
         call ann(x, y_rot, CS%ann_cs)
 
-        call rotate_outputs(dhdx(i,j,k), dhdy(i,j,k), y, y_rot)
+        call rotate_outputs(dhdx(i,j,k), dhdy(i,j,k), y_rot, y)
 
-        y = y_rot * h_grad_mag
-        
+        y(:) = y(:) * h_grad_mag
+      
 
       else if (CS%thickness_ann_model_type == "nondim_ann") then
         ! To test the code with non-dim ANN
         ! Start : Code to work with specific ANN 
         
+        !write(*,*) "i,j,k", i, j, k
+        !write(*,*) "shift", shift
+
         ! Get the data on the local stencil
         dhdx_local(:,:) = dhdx(i-shift:i+shift,j-shift:j+shift,k)
         dhdy_local(:,:) = dhdy(i-shift:i+shift,j-shift:j+shift,k)
@@ -175,6 +178,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
         h_grad_mag = sqrt(h_grad_mag) + tol_h_grad
         vel_grad_mag = sqrt(vel_grad_mag) + tol_vel_grad
 
+        !write(*,*) "h_grad_mag", h_grad_mag, "vel_grad_mag", vel_grad_mag
         ! Non-dim the local gradients
         
         dudx_local(:,:) = dudx_local(:,:) / vel_grad_mag
@@ -185,11 +189,11 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
         dhdx_local(:,:) = dhdx_local(:,:) / h_grad_mag
         dhdy_local(:,:) = dhdy_local(:,:) / h_grad_mag
 
-
         ! General ANN with vel and h gradients as input, with stencils. 
         ! On 12 March 2025, the data was arranged as following in X 
         ! du/dx, dv/dx, du/dy, dv/dy, dh/dx, dh/dy
         ! for each of these variables the arrangement is: 
+        !write(*,*) "dudx shape", SHAPE(dudx_local),", dudx values: ", dudx_local
         x(1:stencil_points)                    = RESHAPE(dudx_local, (/stencil_points/))
         x(stencil_points+1:2*stencil_points)   = RESHAPE(dvdx_local, (/stencil_points/))
         x(2*stencil_points+1:3*stencil_points) = RESHAPE(dudy_local, (/stencil_points/))
@@ -197,15 +201,16 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
         x(4*stencil_points+1:5*stencil_points) = RESHAPE(dhdx_local, (/stencil_points/))
         x(5*stencil_points+1:6*stencil_points) = RESHAPE(dhdy_local, (/stencil_points/))
 
+        !write(*,*) "x dudx", x(1:stencil_points)
+
         call ann(x, y_rot, CS%ann_cs)    
 
         ! Rotate back
-        call rotate_outputs(dhdx(i,j,k), dhdy(i,j,k), y, y_rot)
+        call rotate_outputs(dhdx(i,j,k), dhdy(i,j,k), y_rot, y)
         
         y(:) = y(:) * h_grad_mag * vel_grad_mag * G%areaT(i,j) 
         ! End : Code to work with specific ANN
       endif
-      !write (*,*) "i,j,k:", i, j,k, ", x,y", x, y
       
       FxC(i,j,k) = y(1) * G%mask2dT(i,j) 
       FyC(i,j,k) = y(2) * G%mask2dT(i,j) 
@@ -236,11 +241,15 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   if (CS%id_uhTrANN > 0) call post_data(CS%id_uhTrANN, uhTrANN, CS%diag)
   if (CS%id_vhTrANN > 0) call post_data(CS%id_vhTrANN, vhTrANN, CS%diag)
 
+  if (CS%id_dudx > 0) call post_data(CS%id_dudx, dudx, CS%diag)
+  if (CS%id_dudy > 0) call post_data(CS%id_dudy, dudy, CS%diag)
+  if (CS%id_dvdx > 0) call post_data(CS%id_dvdx, dvdx, CS%diag)
+  if (CS%id_dvdy > 0) call post_data(CS%id_dvdy, dvdy, CS%diag)
+
 end subroutine thickness_flux_ann_full
 
-
 ! > Rotate the outputs back to the original frame.
-subroutine rotate_outputs(dhdx, dhdy, Fvec_xy, Fvec_rot)
+subroutine rotate_outputs(dhdx, dhdy, Fvec_rot, Fvec_xy)
   real, intent(in) :: dhdx, dhdy
   real, dimension(2), intent(in) :: Fvec_rot
   real, dimension(2), intent(out) :: Fvec_xy
@@ -254,18 +263,7 @@ subroutine rotate_outputs(dhdx, dhdy, Fvec_xy, Fvec_rot)
   frame_vec_x = dhdx
   frame_vec_y = dhdy
 
-  mag_frame_vec = sqrt(frame_vec_x**2 + frame_vec_y**2) + 1.0e-30
-
-  T_hat_i = frame_vec_x / mag_frame_vec
-  T_hat_j = frame_vec_y / mag_frame_vec
-
-  N_hat_i = -T_hat_j
-  N_hat_j = T_hat_i
-
-  R_11 = T_hat_i
-  R_12 = N_hat_i
-  R_21 = T_hat_j
-  R_22 = N_hat_j
+  call calc_rotation_matrix(frame_vec_x, frame_vec_y, R_11, R_12, R_21, R_22)
 
   ! note that here we pass in R_transpose, since the function will multiply the vector by (R_transpose)_transpose = R
   call rotate_vector(R_11, R_21, R_12, R_22, Fvec_rot(1), Fvec_rot(2), Fvec_xy(1), Fvec_xy(2))
@@ -291,18 +289,7 @@ subroutine rotate_all_inputs(stencil_width, dhdx, dhdy, dudx, dudy, dvdx, dvdy)
   frame_vec_x = dhdx(mid_point, mid_point)
   frame_vec_y = dhdy(mid_point, mid_point)
 
-  mag_frame_vec = sqrt(frame_vec_x**2 + frame_vec_y**2) + 1.0e-30
-
-  T_hat_i = frame_vec_x / mag_frame_vec
-  T_hat_j = frame_vec_y / mag_frame_vec
-
-  N_hat_i = -T_hat_j
-  N_hat_j = T_hat_i
-
-  R_11 = T_hat_i
-  R_12 = N_hat_i
-  R_21 = T_hat_j
-  R_22 = N_hat_j
+  call calc_rotation_matrix(frame_vec_x, frame_vec_y, R_11, R_12, R_21, R_22)
 
   ! Rotate the gradients
   do j=1, stencil_width ; do i=1, stencil_width
@@ -324,11 +311,11 @@ subroutine rotate_all_inputs(stencil_width, dhdx, dhdy, dudx, dudy, dvdx, dvdy)
 
 end subroutine rotate_all_inputs
 
-! Takes as input R and a vector (v) and rotates it, as R_transpose*v
+! Takes as input R components and a vector (v) and rotates it, as v_rot = R_transpose*v
 subroutine rotate_vector(R_11, R_12, R_21, R_22, V1, V2, Vrot1, Vrot2)
-  real, intent(in) :: R_11, R_12, R_21, R_22
-  real, intent(in) :: V1, V2
-  real, intent(out) :: Vrot1, Vrot2
+  real, intent(in) :: R_11, R_12, R_21, R_22 ! Rotation matrix
+  real, intent(in) :: V1, V2 ! Vector components to be rotated
+  real, intent(out) :: Vrot1, Vrot2 ! Rotated vector components
 
   Vrot1 = R_11 * V1 + R_21 * V2
   Vrot2 = R_12 * V1 + R_22 * V2
@@ -362,6 +349,28 @@ subroutine two_by_two_matrix_multiplication(A_11, A_12, A_21, A_22, B_11, B_12, 
 
 end subroutine two_by_two_matrix_multiplication
   
+subroutine calc_rotation_matrix(frame_vec_x, frame_vec_y, R_11, R_12, R_21, R_22)
+  real, intent(in) :: frame_vec_x, frame_vec_y
+  real, intent(out) :: R_11, R_12, R_21, R_22
+
+  real :: mag_frame_vec
+  real :: T_hat_i, T_hat_j
+  real :: N_hat_i, N_hat_j
+
+  mag_frame_vec = sqrt(frame_vec_x**2 + frame_vec_y**2) + 1.0e-30
+
+  T_hat_i = frame_vec_x / mag_frame_vec
+  T_hat_j = frame_vec_y / mag_frame_vec
+
+  N_hat_i = -T_hat_j
+  N_hat_j = T_hat_i
+
+  R_11 = T_hat_i
+  R_12 = N_hat_i
+  R_21 = T_hat_j
+  R_22 = N_hat_j
+
+end subroutine calc_rotation_matrix
 
 !> Calculates the thickness gradients in each layer at the center points in 3D. 
 !> TODO: the code below does not have the proper handling of the case with variable bottom.
@@ -485,7 +494,7 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
   call get_param(param_file, mdl, "thickness_flux_ann_window", CS%ann_window, &
                         "Number of horizontal grid points to use in the thickness flux ANN window", default=3)
   call get_param(param_file, mdl, "thickness_flux_ann_num_layers", CS%thickness_ann_num_layers, &
-                      "Number of ANN layers for thickness flux", default=4)
+                      "Number of ANN layers for thickness flux (including input and output as layer)", default=4)
   call get_param(param_file, mdl, "thickness_flux_ann_params_file", CS%thickness_ann_NNfile, &
                       "Thickness_flux ANN parameters netcdf input", default="thickness_flux_ann_params.nc")
   call get_param(param_file, mdl, "thickness_flux_model_type", CS%thickness_ann_model_type, &
@@ -495,9 +504,17 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
 
   ! Register diagnostics
   CS%id_dhdx = register_diag_field('ocean_model', 'dhdx', diag%axesTL, Time, &
-              'Horizontal h gradient in x direction', 'm/m', conversion=US%Z_to_L)
+              'Horizontal h gradient in x direction', 'm/m', conversion=US%Z_to_L/US%L_to_m )
   CS%id_dhdy = register_diag_field('ocean_model', 'dhdy', diag%axesTL, Time, &
-              'Horizontal h gradient in y direction', 'm/m', conversion=US%Z_to_L)
+              'Horizontal h gradient in y direction', 'm/m', conversion=US%Z_to_L/US%L_to_m )
+  CS%id_dudx = register_diag_field('ocean_model', 'dudx', diag%axesTL, Time, &
+              'Zonal velocity gradient in x direction', 's-1', conversion=US%s_to_T )
+  CS%id_dudy = register_diag_field('ocean_model', 'dudy', diag%axesTL, Time, &
+              'Zonal velocity gradient in y direction', 's-1', conversion=US%s_to_T )
+  CS%id_dvdx = register_diag_field('ocean_model', 'dvdx', diag%axesTL, Time, &
+              'Meridional velocity gradient in x direction', 's-1', conversion=US%s_to_T )
+  CS%id_dvdy = register_diag_field('ocean_model', 'dvdy', diag%axesTL, Time, &
+              'Meridional velocity gradient in y direction', 's-1', conversion=US%s_to_T )
   CS%id_Fx = register_diag_field('ocean_model', 'Fx', diag%axesTL, Time, &
               'ANN output in x direction', 'm2 s-1', conversion=US%L_to_m**2*US%s_to_T)
   CS%id_Fy = register_diag_field('ocean_model', 'Fy', diag%axesTL, Time, &
@@ -515,8 +532,6 @@ subroutine thickness_flux_ann_end(CS)
   type(thickness_flux_ann_CS), intent(inout) :: CS !< Control structure for thickness_flux_ann
 
 end subroutine thickness_flux_ann_end
-
-
 
 ! ! ! Old routine that may be used if we want to make this modules standalone and apart from the thickness diffuse module. 
 !> Applies the thickness transport calculated in each layer using an ANN,
@@ -568,7 +583,6 @@ subroutine thickness_flux_ann(h, u, v, uhtr, vhtr, dt, G, GV, US, CS)
       if (h(i,j,k) < GV%Angstrom_H) h(i,j,k) = GV%Angstrom_H
     enddo ; enddo
   enddo
-  !write (*,*) "here at last", uhTrANN(4,4,1), uhTrANN(4,4,2)
 
 end subroutine thickness_flux_ann
 
