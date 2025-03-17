@@ -71,6 +71,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   real, allocatable :: y(:), y_rot(:)
   real :: vel_grad_mag, h_grad_mag
   real :: tol_vel_grad, tol_h_grad
+  real :: NGM_C
 
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
   !Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
@@ -115,6 +116,16 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
         x(1) = dhdx(i,j,k)
         x(2) = dhdy(i,j,k)
         call ann(x, y, CS%ann_cs)
+
+      else if (CS%thickness_ann_model_type == "NGM_non_ann") then
+        ! To test code with a simple NGM function incorporated in the ANN module
+        ! but would have to be non-ann since the function is not ANN 
+        y(1) = dudx(i,j,k)*dhdx(i,j,k) + dudy(i,j,k)*dhdy(i,j,k) 
+        y(2) = dvdx(i,j,k)*dhdx(i,j,k) + dvdy(i,j,k)*dhdy(i,j,k)
+
+        write(*,*) "NGM coefficient has not been properly set."
+        NGM_C = 1.0
+        y(:) = y(:) * NGM_C * G%areaT(i,j)
      
       else if (CS%thickness_ann_model_type == "GM_rotated_ann") then 
         ! To test code with a simple GM function incorporated in rotated form
@@ -162,6 +173,10 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
         dvdx_local(:,:) = dvdx(i-shift:i+shift,j-shift:j+shift,k)
         dvdy_local(:,:) = dvdy(i-shift:i+shift,j-shift:j+shift,k)
 
+        !if (i == 10 .and. j == 10 .and. k == 1) then
+        !  write(*,*) 'dudx', dudx(i,j)
+        !  write(*,*) 'dudx_reshaped', RESHAPE(dudx_local, (/stencil_points/))
+        !endif
         ! Rotation to grad h coordinates (always around center point)
         call rotate_all_inputs(CS%ann_window, dhdx_local, dhdy_local, dudx_local, dudy_local, dvdx_local, dvdy_local)
 
@@ -193,13 +208,14 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
         ! On 12 March 2025, the data was arranged as following in X 
         ! du/dx, dv/dx, du/dy, dv/dy, dh/dx, dh/dy
         ! for each of these variables the arrangement is: 
+        ! Doing the tranposing here to ensure that the data arrangement is correct. 
         !write(*,*) "dudx shape", SHAPE(dudx_local),", dudx values: ", dudx_local
-        x(1:stencil_points)                    = RESHAPE(dudx_local, (/stencil_points/))
-        x(stencil_points+1:2*stencil_points)   = RESHAPE(dvdx_local, (/stencil_points/))
-        x(2*stencil_points+1:3*stencil_points) = RESHAPE(dudy_local, (/stencil_points/))
-        x(3*stencil_points+1:4*stencil_points) = RESHAPE(dvdy_local, (/stencil_points/))
-        x(4*stencil_points+1:5*stencil_points) = RESHAPE(dhdx_local, (/stencil_points/))
-        x(5*stencil_points+1:6*stencil_points) = RESHAPE(dhdy_local, (/stencil_points/))
+        x(1:stencil_points)                    = RESHAPE(TRANSPOSE(dudx_local), (/stencil_points/))
+        x(stencil_points+1:2*stencil_points)   = RESHAPE(TRANSPOSE(dvdx_local), (/stencil_points/))
+        x(2*stencil_points+1:3*stencil_points) = RESHAPE(TRANSPOSE(dudy_local), (/stencil_points/))
+        x(3*stencil_points+1:4*stencil_points) = RESHAPE(TRANSPOSE(dvdy_local), (/stencil_points/))
+        x(4*stencil_points+1:5*stencil_points) = RESHAPE(TRANSPOSE(dhdx_local), (/stencil_points/))
+        x(5*stencil_points+1:6*stencil_points) = RESHAPE(TRANSPOSE(dhdy_local), (/stencil_points/))
 
         !write(*,*) "x dudx", x(1:stencil_points)
 
