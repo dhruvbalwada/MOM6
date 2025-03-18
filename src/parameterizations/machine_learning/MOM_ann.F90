@@ -218,15 +218,25 @@ subroutine dense(A, b, x, y, m, n)
     ! Do a y = matmul(x, A)
     ! JAX follows row vector convention
     ! in FORTRAN the matrices are transposed.
-    do j=1,m ! ouput 
-        y(j) = 0.
-        do i=1,n ! input
-            ! Multiply by kernel
+    ! do j=1,m ! ouput 
+    !     y(j) = 0.
+    !     do i=1,n ! input
+    !         ! Multiply by kernel
+    !         y(j) = y(j) + ( x(i) * A(j, i) )
+    !     enddo
+    !     ! Add bias
+    !     y(j) = y(j) + b(j)
+    ! enddo
+
+    y(:) = 0.
+
+    do i=1,n
+        do j=1,m
             y(j) = y(j) + ( x(i) * A(j, i) )
         enddo
-        ! Add bias
-        y(j) = y(j) + b(j)
     enddo
+
+    y(:) = y(:) + b(:)
 
 
 end subroutine dense
