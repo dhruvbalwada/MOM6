@@ -31,11 +31,15 @@ type, public :: THICKNESS_FLUX_ANN_CS ; private
   real :: ann_coeff  !< Coefficient to multiply the ANN output by.
   integer :: ann_window  !< Number of horizontal grid points to use in the ANN window.
   logical :: decompose_h_gradients !< If true, decompose the h gradients into steady and transient parts.
+  real    :: h_min_mask !< Minimum thickness for the mask
+  real    :: h_mask_width !< Width of the mask for the h gradients
 
   type(diag_ctrl), pointer :: diag => NULL() !< structure used to regulate timing of diagnostics
 
   !! Diagnostic identifier
-  integer :: id_dhdx, id_dhdy, id_Fx, id_Fy, id_uhTrANN, id_vhTrANN
+  integer :: id_dhdx, id_dhdy, id_dhbardx, id_dhbardy
+  integer :: id_h_mask
+  integer :: id_Fx, id_Fy, id_uhTrANN, id_vhTrANN
   integer :: id_dudx, id_dudy, id_dvdx, id_dvdy
 
 end type THICKNESS_FLUX_ANN_CS
@@ -261,6 +265,11 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
 
   if (CS%id_dhdx > 0) call post_data(CS%id_dhdx, dhdx, CS%diag)
   if (CS%id_dhdy > 0) call post_data(CS%id_dhdy, dhdy, CS%diag)
+
+  if (CS%id_dhbardx > 0 .and. CS%decompose_h_gradients) call post_data(CS%id_dhbardx, dhbardx, CS%diag)
+  if (CS%id_dhbardy > 0 .and. CS%decompose_h_gradients) call post_data(CS%id_dhbardy, dhbardy, CS%diag)
+  if (CS%id_h_mask > 0 .and. CS%decompose_h_gradients) call post_data(CS%id_h_mask, h_mask, CS%diag)
+
   if (CS%id_Fx > 0) call post_data(CS%id_Fx, FxC, CS%diag)
   if (CS%id_Fy > 0) call post_data(CS%id_Fy, FyC, CS%diag)
   if (CS%id_uhTrANN > 0) call post_data(CS%id_uhTrANN, uhTrANN, CS%diag)
@@ -398,7 +407,6 @@ subroutine calc_rotation_matrix(frame_vec_x, frame_vec_y, R_11, R_12, R_21, R_22
 end subroutine calc_rotation_matrix
 
 !> Calculates the thickness gradients in each layer at the center points in 3D. 
-!> TODO: the code below does not have the proper handling of the case with variable bottom.
 subroutine h_gradients(h, G, GV, dhdx, dhdy, CS)
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
@@ -488,8 +496,8 @@ subroutine decompose_h_gradients(dhdx, dhdy, dhbardx, dhbardy, h_mask, G, GV, CS
 
   do k = 1, nz-1 ! 
     do j=js-shift-1, je+shift+1 ; do i=is-shift-1, ie+shift+1
-      dhbardx(i,j,k) =  - de_bottomdx(i,j) * (1 - h_mask(i,j,k+1)) * h_mask(i,j,nz)
-      dhbardy(i,j,k) =  - de_bottomdy(i,j) * (1 - h_mask(i,j,k+1)) * h_mask(i,j,nz)
+      dhbardx(i,j,k) =  - de_bottomdx(i,j) * (1 - h_mask(i,j,k+1)) * h_mask(i,j,k)
+      dhbardy(i,j,k) =  - de_bottomdy(i,j) * (1 - h_mask(i,j,k+1)) * h_mask(i,j,k)
     enddo ; enddo
   enddo
 
@@ -507,21 +515,22 @@ subroutine calculate_h_mask(h, h_mask, G, GV, CS)
   type(thickness_flux_ann_CS), intent(in) :: CS !< Control structure for thickness_flux_ann
 
   integer :: i, j, k, is, ie, js, je, nz, shift
-  real :: h_min
+  !real :: h_min
 
   shift = (CS%ann_window-1)/2
 
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
 
-  h_min = 1.0 
+  !h_min = 1.0 
   ! This is not a universal choice. 
   ! We should have a better way to set this.
   ! An example of better way may be to set this based on the thickness of the other layers in the column.
 
   do k=1, nz
     do j=js-shift-1, je+shift+1 ; do i=is-shift-1, ie+shift+1 ! We want these to run over same values as places where we compute fluxes. 
-      h_mask(i,j,k) = 1.0
-      if (h(i,j,k) < h_min) h_mask(i,j,k) = 0.0
+      !h_mask(i,j,k) = 1.0
+      !if (h(i,j,k) < CS%h_min_mask) h_mask(i,j,k) = 0.0
+      h_mask(i,j,k) = 0.5 * (1 + tanh((h(i,j,k) - CS%h_min_mask) / CS%h_mask_width))
     enddo ; enddo
   enddo
 
@@ -590,15 +599,14 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
   ! Local variables
   character(len=40) :: mdl = "MOM_thickness_flux_ann"
 # include "version_variable.h"  
-  ! Read parameters
+  
   CS%initialized = .true.
   CS%diag => diag
 
   ! Read all relevant parameters and write them to the model log.
   call log_version(param_file, mdl, version, "")
-
-  ! Setup ann for thickness fluxes
   
+  ! Gather all parameters that are needed. 
   call get_param(param_file, mdl, "thickness_flux_ann_coeff", CS%ann_coeff, &
                       "Coefficient to multiply the thickness flux ANN output by", default=1.0, units="nondim")
   call get_param(param_file, mdl, "thickness_flux_ann_window", CS%ann_window, &
@@ -611,7 +619,12 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
                       "Type of ANN model (e.g. options GM_ann, GM_rotated_ann, nondim_ann).", default="GM_ann")     
   call get_param(param_file, mdl, "decompose_h_gradients", CS%decompose_h_gradients, &
                      "If true, decomposes h gradients into steady and transient parts", default=.false.)
+  call get_param(param_file, mdl, "h_min_mask", CS%h_min_mask, &
+                      "Mask thickness below this thereshold in the ANN.", default=1.0, units="nondim")
+  call get_param(param_file, mdl, "h_mask_width", CS%h_mask_width, &
+                      "Width of the mask transition in the ANN.", default=0.1, units="nondim")
 
+  ! Initialize the ANN
   call ann_init(CS%ann_cs, CS%thickness_ann_num_layers, CS%thickness_ann_NNfile)
 
   ! Register diagnostics
@@ -619,6 +632,10 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
               'Horizontal h gradient in x direction', 'm/m', conversion=US%Z_to_L/US%L_to_m )
   CS%id_dhdy = register_diag_field('ocean_model', 'dhdy', diag%axesTL, Time, &
               'Horizontal h gradient in y direction', 'm/m', conversion=US%Z_to_L/US%L_to_m )
+  CS%id_dhbardx = register_diag_field('ocean_model', 'dhbardx', diag%axesTL, Time, &
+              'Horizontal h gradient due to bottom in x direction', 'm/m', conversion=US%Z_to_L/US%L_to_m )
+  CS%id_dhbardy = register_diag_field('ocean_model', 'dhbardy', diag%axesTL, Time, &
+              'Horizontal h gradient due to bottom in y direction', 'm/m', conversion=US%Z_to_L/US%L_to_m )
   CS%id_dudx = register_diag_field('ocean_model', 'dudx', diag%axesTL, Time, &
               'Zonal velocity gradient in x direction', 's-1', conversion=US%s_to_T )
   CS%id_dudy = register_diag_field('ocean_model', 'dudy', diag%axesTL, Time, &
@@ -635,6 +652,8 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
               'Zonal ANN h transport ~ u*h*dy', 'm3 s-1', conversion=US%L_to_m**3*US%s_to_T)
   CS%id_vhTrANN = register_diag_field('ocean_model', 'vhTrANN', diag%axesCvL, Time, &
               'Meridional ANN h transport ~ v*h*dx', 'm3 s-1', conversion=US%L_to_m**3*US%s_to_T)
+  CS%id_h_mask = register_diag_field('ocean_model', 'h_mask', diag%axesTL, Time, &
+              'Mask based on the thickness', 'nondim', conversion=1.0)
 
 
 end subroutine thickness_flux_ann_init
