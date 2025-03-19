@@ -469,7 +469,7 @@ subroutine decompose_h_gradients(dhdx, dhdy, dhbardx, dhbardy, h_mask, G, GV, CS
 
   shift = (CS%ann_window-1)/2
 
-  do j=js-shift-2, je+shift+1 ; do i=is-shift-2, ie+shift+1
+  do j=js-shift-2, je+shift+2 ; do i=is-shift-2, ie+shift+2
     e_bottom(i,j) = - G%bathyT(i,j)
   enddo ; enddo
 
@@ -489,11 +489,12 @@ subroutine decompose_h_gradients(dhdx, dhdy, dhbardx, dhbardy, h_mask, G, GV, CS
     de_bottomdy(i,j) = 0.5 * (de_bottomdy_v(i,J) + de_bottomdy_v(i,J-1)) * G%mask2dT(i,j)
   enddo ; enddo
 
+  ! For bottom layer
   do j=js-shift-1, je+shift+1 ; do i=is-shift-1, ie+shift+1
     dhbardx(i,j,nz) =  - de_bottomdx(i,j) * h_mask(i,j,nz)
     dhbardy(i,j,nz) =  - de_bottomdy(i,j) * h_mask(i,j,nz)
   enddo ; enddo
-
+  ! all other layers
   do k = 1, nz-1 ! 
     do j=js-shift-1, je+shift+1 ; do i=is-shift-1, ie+shift+1
       dhbardx(i,j,k) =  - de_bottomdx(i,j) * (1 - h_mask(i,j,k+1)) * h_mask(i,j,k)
