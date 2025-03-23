@@ -118,6 +118,7 @@ type, public :: thickness_diffuse_CS ; private
 
   ! DB < 
   logical :: use_thickness_flux_ann
+  logical :: use_TW_flux_form
   type(thickness_flux_ann_CS) :: thickness_flux_ann_CSp !< Pointer to the control structure used for the thickness flux ANN
   ! DB >
 
@@ -517,7 +518,7 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   ! DB <
   ! Calculate the uh and vh transport using ANN, and add them with diffusive transports. 
   if (CS%use_thickness_flux_ann) then
-    call thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS%thickness_flux_ann_CSp)
+    call thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS%thickness_flux_ann_CSp, dt)
     !write (*,*) uhTrANN(1,1,1), vhTrANN(1,1,1)
     uhD(:,:,:) = uhD(:,:,:) +  uhTrANN(:,:,:)
     vhD(:,:,:) = vhD(:,:,:) +  vhTrANN(:,:,:)
@@ -607,9 +608,20 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
       if (associated(CDp%vhGM)) CDp%vhGM(i,J,k) = vhD(i,J,k)
     enddo ; enddo
     do j=js,je ; do i=is,ie
-      h(i,j,k) = h(i,j,k) - dt * G%IareaT(i,j) * &
-          ((uhD(I,j,k) - uhD(I-1,j,k)) + (vhD(i,J,k) - vhD(i,J-1,k)))
-      if (h(i,j,k) < GV%Angstrom_H) h(i,j,k) = GV%Angstrom_H
+      ! DB <
+      if (CS%use_TW_flux_form) then
+        h(i,j,k) = h(i,j,k) - dt * G%IareaT(i,j) * &
+           ( h(i,j,k)* ((uhD(I,j,k) - uhD(I-1,j,k)) + (vhD(i,J,k) - vhD(i,J-1,k))) )/ (h(i,j,k)+h_neglect)
+      else
+        h(i,j,k) = h(i,j,k) - dt * G%IareaT(i,j) * &
+           ((uhD(I,j,k) - uhD(I-1,j,k)) + (vhD(i,J,k) - vhD(i,J-1,k)))
+      endif
+      ! DB >
+      ! Old <
+      ! h(i,j,k) = h(i,j,k) - dt * G%IareaT(i,j) * &
+      !     ((uhD(I,j,k) - uhD(I-1,j,k)) + (vhD(i,J,k) - vhD(i,J-1,k)))
+      ! Old >
+       if (h(i,j,k) < GV%Angstrom_H) h(i,j,k) = GV%Angstrom_H
     enddo ; enddo
   enddo
 
@@ -2356,6 +2368,8 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
   ! DB <
   call get_param(param_file, "MOM", "THICKNESS_FLUX_ANN", CS%use_thickness_flux_ann, &
                  "If true, use the thickness flux ann.", default=.false.)
+  call get_param(param_file, "MOM", "THICKNESS_WEIGHTED_FLUX_FORM", CS%use_TW_flux_form, &
+                 "If true, use the thickness weighted flux form for thickness params.", default=.false.)          
   if (CS%use_thickness_flux_ann) &
     call thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS%thickness_flux_ann_CSp)
   ! DB >

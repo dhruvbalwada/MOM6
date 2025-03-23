@@ -11,6 +11,8 @@ use MOM_diag_mediator,         only : post_data, query_averaging_enabled, diag_c
 use MOM_diag_mediator,         only : register_diag_field, safe_alloc_ptr, time_type
 use MOM_diag_mediator,         only : diag_update_remap_grids
 use MOM_domains,               only : pass_var, CORNER, pass_vector
+use MOM_interface_heights,     only : find_eta, thickness_to_dz
+use MOM_variables,             only : thermo_var_ptrs, cont_diag_ptrs
 
 implicit none ; private
 
@@ -29,10 +31,14 @@ type, public :: THICKNESS_FLUX_ANN_CS ; private
   character(len=200) :: thickness_ann_NNfile   ! The name of netcdf file having neural network shape function
   character(len=200) :: thickness_ann_model_type ! The type of model to use for thickness fluxes
   real :: ann_coeff  !< Coefficient to multiply the ANN output by.
+  real :: FGR_ANN !< The filter to grid ratio for ANN, we have different filter scales and dx
   integer :: ann_window  !< Number of horizontal grid points to use in the ANN window.
   logical :: decompose_h_gradients !< If true, decompose the h gradients into steady and transient parts.
   real    :: h_min_mask !< Minimum thickness for the mask
   real    :: h_mask_width !< Width of the mask for the h gradients
+  logical :: h_mask_flux !< If true, mask regions where layer very thin.
+  logical :: remove_barotropic_flux !< If true, remove the barotropic component from the thickness fluxes.
+  logical :: limit_upslope_flow !< If true, limit the upslope flow.
 
   type(diag_ctrl), pointer :: diag => NULL() !< structure used to regulate timing of diagnostics
 
@@ -48,16 +54,18 @@ contains
 
 !> Calculates the parameterized thickness fluxes for use in the continuity equation.
 !> Returns the fluxes at the u,v points.
-subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
+subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS, dt)
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
+  type(thermo_var_ptrs),                      intent(in)    :: tv     !< Thermodynamics structure
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(in)    :: h      !< Layer thickness [H ~> m or kg m-2]
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(in)    :: u      !< Zonal velocity [L T-1 ~> m s-1]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(in)    :: v      !< Meridional velocity [L T-1 ~> m s-1]
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(out)   :: uhTrANN   !< Zonal ANN h transport u*h*dy [L2 H T-1 ~> m3 s-1 or kg s-1]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(out)   :: vhTrANN   !< Meridional ANN h transport v*h*dx [L2 H T-1 ~> m3 s-1 or kg s-1]
   type(thickness_flux_ann_CS),                intent(inout) :: CS !< Control structure for thickness_flux_ann
+  real,                                       intent(in)    :: dt     !< Time increment [T ~> s]
   ! Local variables
   integer :: i, j, k, is, ie, js, je, nz, shift, stencil_points, ii, jj
   integer :: Nin ! number of input variable types to the ANN (will be multiplied by the window size later )
@@ -68,6 +76,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dvdx, dvdy
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: h_mask
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dhbardx, dhbardy
+  
   
   ! Variables for the ANN output 
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: FxC, FyC
@@ -237,12 +246,19 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
         ! Rotate back
         call rotate_outputs(dhdx(i,j,k), dhdy(i,j,k), y_rot, y)
         
-        y(:) = y(:) * h_grad_mag * vel_grad_mag * G%areaT(i,j) 
+        ! Multiply by the norm factors.
+        y(:) = y(:) * h_grad_mag * (h(i,j,k) ** 2 / (h(i,j,k) + CS%h_min_mask)**2 ) * vel_grad_mag * G%areaT(i,j) * CS%FGR_ANN * CS%FGR_ANN
         ! End : Code to work with specific ANN
       endif
       
-      FxC(i,j,k) = y(1) * G%mask2dT(i,j) 
-      FyC(i,j,k) = y(2) * G%mask2dT(i,j) 
+      if (CS%h_mask_flux) then
+        FxC(i,j,k) = y(1) * G%mask2dT(i,j) * h_mask(i,j,k)
+        FyC(i,j,k) = y(2) * G%mask2dT(i,j) * h_mask(i,j,k)
+      else
+        FxC(i,j,k) = y(1) * G%mask2dT(i,j) 
+        FyC(i,j,k) = y(2) * G%mask2dT(i,j) 
+      end if
+
     enddo ; enddo
   
   !> Interpolate fluxes to u, v points
@@ -252,15 +268,24 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
     enddo ; enddo
     do j=js-1,je ; do i=is,ie
       vhTrANN(i,J,k) = 0.5 * (FyC(i,j,k) + FyC(i,j+1,k)) * G%dxCv(i,J) * G%mask2dCv(i,J) * CS%ann_coeff
-    enddo ; enddo
-
-  !> Put any limiters that may be needed. 
+    enddo ; enddo 
 
   enddo
 
-  !> Apply the no- BT flow condition (for 2 layers)
-  !uhTrANN(:,:,1) = - uhTrANN(:,:,2) 
-  !vhTrANN(:,:,1) = - vhTrANN(:,:,2) 
+  ! Apply flux limiters
+  if (CS%limit_upslope_flow) then
+    call upslope_limiter(h, uhTrANN, vhTrANN, G, GV, US, CS, tv)
+  endif
+
+   !> Apply the no- BT flow condition (for 2 layers)
+  ! There are many ways to do this, and we made simplest seeming adhoc choice.
+  if (CS%remove_barotropic_flux) then
+    uhTrANN(:,:,1) = - uhTrANN(:,:,2) 
+    vhTrANN(:,:,1) = - vhTrANN(:,:,2)
+  endif
+
+  ! Seems like a good idea to call this unconditionally.
+  call squeeze_limiter(h, uhTrANN, vhTrANN, dt, G, Gv, CS)
 
 
   if (CS%id_dhdx > 0) call post_data(CS%id_dhdx, dhdx, CS%diag)
@@ -586,6 +611,114 @@ subroutine vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
   enddo
 end subroutine vel_gradients
 
+!> Apply upslope limiter to the ANN fluxes
+!> This ensures that the ANN fluxes don't start to increase the APE of the flow near grounded isopycnals.
+!> The physicality of this is arguable, but if not used leads to numerical issues.
+!> Some energetics based schemes may help remove this strict condition in future. 
+!> Tendencies from the resolved part of the flow may still be able to move isopycnals relative to topo (as they should).
+subroutine upslope_limiter(h, uhTrANN, vhTrANN, G, Gv, US, CS, tv) 
+  type(ocean_grid_type), intent(in) :: G
+  type(verticalGrid_type), intent(in) :: GV
+  type(unit_scale_type), intent(in) :: US
+  type(thermo_var_ptrs),                      intent(in)    :: tv     !< Thermodynamics structure
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(in) :: h !< Layer thickness [H ~> m or kg m-2]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(inout)   :: uhTrANN   !< Zonal ANN h transport u*h*dy [L2 H T-1 ~> m3 s-1 or kg s-1]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(inout)   :: vhTrANN   !< Meridional ANN h transport v*h*dx [L2 H T-1 ~> m3 s-1 or kg s-1]
+  type(thickness_flux_ann_CS), intent(in) :: CS !< Control structure for thickness_flux_ann
+
+  real :: e(SZI_(G),SZJ_(G),SZK_(GV)+1) ! heights of interfaces, relative to mean
+                                         ! sea level [Z ~> m], positive up.
+  integer :: i, j, k, is, ie, js, je, nz
+  real :: dz_neglect
+
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+
+  dz_neglect = GV%dZ_subroundoff
+
+  ! Calculates interface heights, e, in [Z ~> m].
+  call find_eta(h, tv, G, GV, US, e, halo_size=1)
+
+  do k=1, nz
+    
+    do j=js, je ; do I=is-1, ie
+      if (uhTrANN(I,j,k) > 0.0) then ! if flow to the east
+        if (e(i,j,K) < e(i+1,j,nz+1)) then ! if fully blocked by topography to the east
+          uhTrANN(I,j,k) = 0.0
+        elseif (e(i,j,K+1) < e(i+1,j,nz+1)) then! if partially blocked by topography to the east
+          uhTrANN(I,j,k) = uhTrANN(I,j,k) * ((e(i,j,K) - e(i+1,j,nz+1)) / (h(i,j,k) + dz_neglect))
+        endif 
+      else ! if flow to the west
+        if (e(i,j,nz+1) > e(i+1,j,K)) then ! if fully blocked by topography to the west
+          uhTrANN(I,j,k) = 0.0
+        elseif (e(i,j,nz+1) > e(i+1,j,K+1) ) then ! if partially blocked by topography to the west
+          uhTrANN(I,j,k) = uhTrANN(I,j,k) * ((e(i+1,j,K) - e(i,j,nz+1)) / (h(i+1,j,k) + dz_neglect))
+        endif
+      endif
+    enddo ; enddo
+
+    do J=js-1, je ; do i=is, ie
+      if (vhTrANN(i,J,k) > 0.0) then ! if flow to the north
+        if (e(i,j,K) < e(i,j+1,nz+1)) then ! if fully blocked by topography to the north
+          vhTrANN(i,J,k) = 0.0
+        elseif (e(i,j,K+1) < e(i,j+1,nz+1)) then ! if partially blocked by topography to the north
+          vhTrANN(i,J,k) = vhTrANN(i,J,k) * ((e(i,j,K) - e(i,j+1,nz+1)) / (h(i,j,k) + dz_neglect))
+        endif
+      else ! if flow to the south
+        if (e(i,j,nz+1) > e(i,j+1,K)) then ! if fully blocked by topography to the south
+          vhTrANN(i,J,k) = 0.0
+        elseif (e(i,j,nz+1) > e(i,j+1,K+1)) then ! if partially blocked by topography to the south
+          vhTrANN(i,J,k) = vhTrANN(i,J,k) * ((e(i,j+1,K) - e(i,j,nz+1)) / (h(i,j+1,k) + dz_neglect))
+        endif
+      endif
+    enddo ; enddo
+
+  enddo
+    
+
+end subroutine upslope_limiter
+
+!> Apply a flux limiter that prevents ANN fluxes from making isopycnal thickness negative
+!> 
+subroutine squeeze_limiter(h, uhTrANN, vhTrANN, dt, G, Gv, CS)
+  type(ocean_grid_type), intent(in) :: G
+  type(verticalGrid_type), intent(in) :: GV
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(in) :: h !< Layer thickness [H ~> m or kg m-2]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(inout)   :: uhTrANN   !< Zonal ANN h transport u*h*dy [L2 H T-1 ~> m3 s-1 or kg s-1]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(inout)   :: vhTrANN   !< Meridional ANN h transport v*h*dx [L2 H T-1 ~> m3 s-1 or kg s-1]
+  type(thickness_flux_ann_CS), intent(in) :: CS !< Control structure for thickness_flux_ann
+  real, intent(in) :: dt !< Time step [T ~> s]
+
+  !local variables
+  integer :: i, j, k, is, ie, js, je, nz
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) ::  h_avail    ! The mass available for transport out of each face, divided
+                                                              ! by dt [H L2 T-1 ~> m3 s-1 or kg s-1].
+  real :: I4dt          ! 1 / 4 dt [T-1 ~> s-1].
+
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+
+  I4dt = 0.25 / dt
+
+  do k = 1, nz
+    do j=js-1,je+1 ; do i=is-1,ie+1
+      ! Maximum volume that may be transported out of any face (1/4 of the volume of the cell)
+      h_avail(i,j,k) = max(I4dt*G%areaT(i,j)*(h(i,j,k) - GV%Angstrom_H), 0.0)
+    enddo ; enddo
+  enddo
+
+  do k = 1, nz
+    do j=js,je ; do i=is-1,ie
+      ! Limit the fluxes to the available mass
+      uhTrANN(i,j,k) = max( min(uhTrANN(i,j,k), h_avail(i,j,k)), -h_avail(i+1,j,k))
+    enddo ; enddo
+
+    do j=js-1,je ; do i=is,ie
+      vhTrANN(i,j,k) = max( min(vhTrANN(i,j,k), h_avail(i,j,k)), -h_avail(i,j+1,k))
+    enddo ; enddo
+  enddo
+      
+
+end subroutine squeeze_limiter
+
 !> Init function
 ! Read parameters and register output fields.
 subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
@@ -620,10 +753,18 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
                       "Type of ANN model (e.g. options GM_ann, GM_rotated_ann, nondim_ann).", default="GM_ann")     
   call get_param(param_file, mdl, "decompose_h_gradients", CS%decompose_h_gradients, &
                      "If true, decomposes h gradients into steady and transient parts", default=.false.)
+  call get_param(param_file, mdl, "h_mask_flux", CS%h_mask_flux, &
+                     "If true, masks flux in regions with very small layer thickness", default=.false.)                     
+  call get_param(param_file, mdl, "remove_barotropic_flux", CS%remove_barotropic_flux, &
+                     "If true, remove barotropic component from flux", default=.false.) 
+  call get_param(param_file, mdl, "limit_upslope_flow", CS%limit_upslope_flow, &
+                     "If true, limit flux that pushes isopycnals upslope.", default=.false.)                                          
   call get_param(param_file, mdl, "h_min_mask", CS%h_min_mask, &
                       "Mask thickness below this thereshold in the ANN.", default=1.0, units="nondim")
   call get_param(param_file, mdl, "h_mask_width", CS%h_mask_width, &
                       "Width of the mask transition in the ANN.", default=0.1, units="nondim")
+  call get_param(param_file, mdl, "FGR_ANN", CS%FGR_ANN, &
+                      "Filter to grid ratio for the ANN", default=1.0, units="nondim")
 
   ! Initialize the ANN
   call ann_init(CS%ann_cs, CS%thickness_ann_num_layers, CS%thickness_ann_NNfile)
@@ -668,55 +809,55 @@ end subroutine thickness_flux_ann_end
 ! ! ! Old routine that may be used if we want to make this modules standalone and apart from the thickness diffuse module. 
 !> Applies the thickness transport calculated in each layer using an ANN,
 !! and updates the thicknesses, h. 
-subroutine thickness_flux_ann(h, u, v, uhtr, vhtr, dt, G, GV, US, CS)
-  type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
-  type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
-  type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(inout) :: h      !< Layer thickness [H ~> m or kg m-2]
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(in)    :: u !< Zonal velocity
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(in)    :: v !< Meridional velocity
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(inout) :: uhtr   !< Accumulated zonal mass flux
-                                                                      !! [L2 H ~> m3 or kg]
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(inout) :: vhtr   !< Accumulated meridional mass flux
-                                                                    !! [L2 H ~> m3 or kg]
-  real,                                       intent(in)    :: dt !< Time step [T ~> s]
-  type(thickness_flux_ann_CS),                intent(inout) :: CS !< Control structure for thickness_flux_ann
+! subroutine thickness_flux_ann(h, u, v, uhtr, vhtr, dt, G, GV, US, CS)
+!   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
+!   type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
+!   type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
+!   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(inout) :: h      !< Layer thickness [H ~> m or kg m-2]
+!   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(in)    :: u !< Zonal velocity
+!   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(in)    :: v !< Meridional velocity
+!   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(inout) :: uhtr   !< Accumulated zonal mass flux
+!                                                                       !! [L2 H ~> m3 or kg]
+!   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(inout) :: vhtr   !< Accumulated meridional mass flux
+!                                                                     !! [L2 H ~> m3 or kg]
+!   real,                                       intent(in)    :: dt !< Time step [T ~> s]
+!   type(thickness_flux_ann_CS),                intent(inout) :: CS !< Control structure for thickness_flux_ann
 
-  real :: uhTrANN(SZIB_(G),SZJ_(G),SZK_(GV)) ! Zonal ANN h transport ~ u*h*dy [L2 H T-1 ~> m3 s-1 or kg s-1]
-  real :: vhTrANN(SZI_(G),SZJB_(G),SZK_(GV)) ! Meridional ANN h transport ~ v*h*dx [L2 H T-1 ~> m3 s-1 or kg s-1]
-  integer :: i, j, k, is, ie, js, je, nz
-  real :: h_neglect ! A thickness that is so small it is usually lost
-                    ! in roundoff and can be neglected [H ~> m or kg m-2].
+!   real :: uhTrANN(SZIB_(G),SZJ_(G),SZK_(GV)) ! Zonal ANN h transport ~ u*h*dy [L2 H T-1 ~> m3 s-1 or kg s-1]
+!   real :: vhTrANN(SZI_(G),SZJB_(G),SZK_(GV)) ! Meridional ANN h transport ~ v*h*dx [L2 H T-1 ~> m3 s-1 or kg s-1]
+!   integer :: i, j, k, is, ie, js, je, nz
+!   real :: h_neglect ! A thickness that is so small it is usually lost
+!                     ! in roundoff and can be neglected [H ~> m or kg m-2].
 
 
-  is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
-  h_neglect = GV%H_subroundoff
+!   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
+!   h_neglect = GV%H_subroundoff
 
-  uhTrANN = 0.0
-  vhTrANN = 0.0
+!   uhTrANN = 0.0
+!   vhTrANN = 0.0
 
-  !> Calculate the thickness fluxes using the ANN
-  call thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
+!   !> Calculate the thickness fluxes using the ANN
+!   call thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, CS)
 
-  ! Update the layer thickness 
-  !$OMP parallel do default(shared)
-  do k=1,nz
-    do j=js,je ; do I=is-1,ie
-      uhtr(I,j,k) = uhtr(I,j,k) + uhTrANN(I,j,k) * dt
-      !if (associated(CDp%uhGM)) CDp%uhGM(I,j,k) = uhD(I,j,k)
-    enddo ; enddo
-    do J=js-1,je ; do i=is,ie
-      vhtr(i,J,k) = vhtr(i,J,k) + vhTrANN(i,J,k) * dt
-      !if (associated(CDp%vhGM)) CDp%vhGM(i,J,k) = vhD(i,J,k)
-    enddo ; enddo
-    do j=js,je ; do i=is,ie
-      h(i,j,k) = h(i,j,k) - dt * G%IareaT(i,j) * &
-          ((uhTrANN(I,j,k) - uhTrANN(I-1,j,k)) + (vhTrANN(i,J,k) - vhTrANN(i,J-1,k)))
-      if (h(i,j,k) < GV%Angstrom_H) h(i,j,k) = GV%Angstrom_H
-    enddo ; enddo
-  enddo
+!   ! Update the layer thickness 
+!   !$OMP parallel do default(shared)
+!   do k=1,nz
+!     do j=js,je ; do I=is-1,ie
+!       uhtr(I,j,k) = uhtr(I,j,k) + uhTrANN(I,j,k) * dt
+!       !if (associated(CDp%uhGM)) CDp%uhGM(I,j,k) = uhD(I,j,k)
+!     enddo ; enddo
+!     do J=js-1,je ; do i=is,ie
+!       vhtr(i,J,k) = vhtr(i,J,k) + vhTrANN(i,J,k) * dt
+!       !if (associated(CDp%vhGM)) CDp%vhGM(i,J,k) = vhD(i,J,k)
+!     enddo ; enddo
+!     do j=js,je ; do i=is,ie
+!       h(i,j,k) = h(i,j,k) - dt * G%IareaT(i,j) * &
+!           ((uhTrANN(I,j,k) - uhTrANN(I-1,j,k)) + (vhTrANN(i,J,k) - vhTrANN(i,J-1,k)))
+!       if (h(i,j,k) < GV%Angstrom_H) h(i,j,k) = GV%Angstrom_H
+!     enddo ; enddo
+!   enddo
 
-end subroutine thickness_flux_ann
+!end subroutine thickness_flux_ann
 
 
 end module MOM_thickness_flux_ann
