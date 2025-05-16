@@ -13,6 +13,7 @@ use MOM_diag_mediator,         only : diag_update_remap_grids
 use MOM_domains,               only : pass_var, CORNER, pass_vector
 use MOM_interface_heights,     only : find_eta, thickness_to_dz
 use MOM_variables,             only : thermo_var_ptrs, cont_diag_ptrs
+use MOM_isopycnal_slopes,      only : calc_isoneutral_slopes
 
 implicit none ; private
 
@@ -39,6 +40,7 @@ type, public :: THICKNESS_FLUX_ANN_CS ; private
   logical :: h_mask_flux !< If true, mask regions where layer very thin.
   logical :: remove_barotropic_flux !< If true, remove the barotropic component from the thickness fluxes.
   logical :: limit_upslope_flow !< If true, limit the upslope flow.
+  real :: kappa_smooth    !< A diffusivity for smoothing T/S in vanished layers [H Z T-1 ~> m2 s-1 or kg m-1 s-1]
 
   type(diag_ctrl), pointer :: diag => NULL() !< structure used to regulate timing of diagnostics
 
@@ -88,6 +90,9 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
   real :: vel_grad_mag, h_grad_mag
   real :: tol_vel_grad, tol_h_grad
   real :: NGM_C
+  logical :: use_EOS    ! If true, density is calculated from T & S using an equation of state.
+
+  use_EOS = associated(tv%eqn_of_state)
 
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
   !Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
@@ -115,7 +120,13 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
 
   !> Calculates the h and u gradients in full 3D domain
   call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
-  call h_gradients(h, G, GV, dhdx, dhdy, CS)
+
+  ! Calculate the h gradients in full 3D domain
+  if (use_EOS) then
+    call h_gradients_EOS(h, G, GV, US, dhdx, dhdy, CS, tv, dt)
+  else
+    call h_gradients(h, G, GV, dhdx, dhdy, CS)
+  endif
 
   if (CS%decompose_h_gradients) then
     call calculate_h_mask(h, h_mask, G, GV, CS)
@@ -247,8 +258,11 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
         call rotate_outputs(dhdx(i,j,k), dhdy(i,j,k), y_rot, y)
         
         ! Multiply by the norm factors.
-        y(:) = y(:) * h_grad_mag * (h(i,j,k) ** 2 / (h(i,j,k) + CS%h_min_mask)**2 ) * vel_grad_mag * G%areaT(i,j) * CS%FGR_ANN * CS%FGR_ANN
+        y(:) = y(:) * h_grad_mag * ( h(i,j,k) ** 2 / (h(i,j,k) + CS%h_min_mask)**2 ) * vel_grad_mag * G%areaT(i,j) * CS%FGR_ANN * CS%FGR_ANN
         ! End : Code to work with specific ANN
+      else
+        write(*,*) "thickness_ann_model_type not recognized"
+        stop
       endif
       
       if (CS%h_mask_flux) then
@@ -288,6 +302,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
   call squeeze_limiter(h, uhTrANN, vhTrANN, dt, G, Gv, CS)
 
 
+  !if (CS%id_dhdx > 0) write(*,*) 'Here', dhdx(2,2,2)
   if (CS%id_dhdx > 0) call post_data(CS%id_dhdx, dhdx, CS%diag)
   if (CS%id_dhdy > 0) call post_data(CS%id_dhdy, dhdy, CS%diag)
 
@@ -304,6 +319,8 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
   if (CS%id_dudy > 0) call post_data(CS%id_dudy, dudy, CS%diag)
   if (CS%id_dvdx > 0) call post_data(CS%id_dvdx, dvdx, CS%diag)
   if (CS%id_dvdy > 0) call post_data(CS%id_dvdy, dvdy, CS%diag)
+
+
 
 end subroutine thickness_flux_ann_full
 
@@ -430,6 +447,64 @@ subroutine calc_rotation_matrix(frame_vec_x, frame_vec_y, R_11, R_12, R_21, R_22
   R_22 = N_hat_j
 
 end subroutine calc_rotation_matrix
+
+
+!> Calculate thickness gradients when EOS is used.
+subroutine h_gradients_EOS(h, G, GV, US, dhdx, dhdy, CS, tv, dt)
+  type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
+  type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
+  type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(in)    :: h      !< Layer thickness [H ~> m or kg m-2]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(out)   :: dhdx, dhdy      !< components of the h gradients on the i,j points (cell-center)
+  type(thickness_flux_ann_CS),                intent(in)    :: CS !< Control structure for thickness_flux_ann
+  type(thermo_var_ptrs),                      intent(in)    :: tv    !< Thermodynamics structure
+  real,                                       intent(in)    :: dt     !< Time increment [T ~> s]
+  ! Local variables
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)     :: e    ! The interface heights relative to mean sea level [Z ~> m]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1)    :: slope_x !< Zonal isoneutral slope [Z L-1 ~> nondim]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1)    :: slope_y !< Meridional isoneutral slope
+                                                                         !! [Z L-1 ~> nondim]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: dhdx_u
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: dhdy_v
+   
+  logical :: use_stanley
+  integer :: is, ie, js, je
+  !integer :: Isq, Ieq, Jsq, Jeq
+  integer :: nz
+  integer :: i, j, k
+  integer :: shift
+
+  use_stanley = .false.
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+
+  call find_eta(h, tv, G, GV, US, e, halo_size=3)
+  call calc_isoneutral_slopes(G, GV, US, h, e, tv, dt*CS%kappa_smooth, use_stanley, &
+                                  slope_x, slope_y, halo=2)
+  ! Calculate the extra points that grid needs to be extended to, using the ANN window
+  ! done as (ann_window-1)/2 as integer
+  shift = (CS%ann_window-1)/2
+
+  do k=1, nz
+    ! Calculate the x-gradients at u points
+    ! I don't follow the MOM6 soft convention for loops (as it seemed a bit confusing with these shifts)
+    do j=js-shift-1, je+shift+1 ; do i=is-shift-2, ie+shift+1 ! extra points needed in the x direction since we interpolate to center
+      dhdx_u(I,j,k) =  (slope_x(i,j,k) - slope_x(i,j,k+1)) * G%mask2dCu(I,j)
+    enddo ; enddo
+    ! Calculate the y-gradients at v points
+    do j=js-shift-2, je+shift+1 ; do i=is-shift-1, ie+shift+1 ! extra points needed in the y direction since we interpolate to center
+      dhdy_v(i,J,k) =  (slope_y(i,j,k) - slope_y(i,j,k+1)) * G%mask2dCv(i,J)
+    enddo ; enddo
+    ! Interpolate the gradients to the center points
+    ! We need these at +/- shift points because that is the local domain that the ANN will use.
+    do j=js-shift-1, je+shift+1 ; do i=is-shift-1, ie+shift+1
+      dhdx(i,j,k) = 0.5 * (dhdx_u(I,j,k) + dhdx_u(I-1,j,k)) * G%mask2dT(i,j)
+      dhdy(i,j,k) = 0.5 * (dhdy_v(i,J,k) + dhdy_v(i,J-1,k)) * G%mask2dT(i,j)
+    enddo ; enddo
+  enddo ! end k loop                                
+
+
+
+end subroutine h_gradients_EOS
 
 !> Calculates the thickness gradients in each layer at the center points in 3D. 
 subroutine h_gradients(h, G, GV, dhdx, dhdy, CS)
@@ -765,6 +840,10 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
                       "Width of the mask transition in the ANN.", default=0.1, units="nondim")
   call get_param(param_file, mdl, "FGR_ANN", CS%FGR_ANN, &
                       "Filter to grid ratio for the ANN", default=1.0, units="nondim")
+  call get_param(param_file, mdl, "KD_SMOOTH", CS%kappa_smooth, &
+                 "A diapycnal diffusivity that is used to interpolate "//&
+                 "more sensible values of T & S into thin layers.", &
+                 units="m2 s-1", default=1.0e-6, scale=GV%m2_s_to_HZ_T)
 
   ! Initialize the ANN
   call ann_init(CS%ann_cs, CS%thickness_ann_num_layers, CS%thickness_ann_NNfile)

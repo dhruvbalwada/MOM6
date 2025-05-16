@@ -609,7 +609,7 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
     enddo ; enddo
     do j=js,je ; do i=is,ie
       ! DB <
-      if (CS%use_TW_flux_form) then
+      if (CS%use_TW_flux_form) then ! The problem with this form is that it disturbs the conservation properties. 
         h(i,j,k) = h(i,j,k) - dt * G%IareaT(i,j) * &
            ( h(i,j,k)* ((uhD(I,j,k) - uhD(I-1,j,k)) + (vhD(i,J,k) - vhD(i,J-1,k))) )/ (h(i,j,k)+h_neglect)
       else
