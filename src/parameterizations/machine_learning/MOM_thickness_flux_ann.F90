@@ -41,6 +41,7 @@ type, public :: THICKNESS_FLUX_ANN_CS ; private
   logical :: remove_barotropic_flux !< If true, remove the barotropic component from the thickness fluxes.
   logical :: limit_upslope_flow !< If true, limit the upslope flow.
   real :: kappa_smooth    !< A diffusivity for smoothing T/S in vanished layers [H Z T-1 ~> m2 s-1 or kg m-1 s-1]
+  real    :: slope_max           !< Slopes steeper than slope_max are limited in some way [Z L-1 ~> nondim]
 
   type(diag_ctrl), pointer :: diag => NULL() !< structure used to regulate timing of diagnostics
 
@@ -78,6 +79,9 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dvdx, dvdy
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: h_mask
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dhbardx, dhbardy
+
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1)    :: Sfn_unlim_u, slope_x !< Zonal transport streamfunction without limiters
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1)    :: Sfn_unlim_v, slope_y !< Meridional transport streamfunction without limiters
   
   
   ! Variables for the ANN output 
@@ -90,6 +94,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
   real :: vel_grad_mag, h_grad_mag
   real :: tol_vel_grad, tol_h_grad
   real :: NGM_C
+  integer :: nk_linear  ! The number of layers over which the streamfunction goes to 0.
   logical :: use_EOS    ! If true, density is calculated from T & S using an equation of state.
 
   use_EOS = associated(tv%eqn_of_state)
@@ -104,6 +109,8 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
 
   uhTrANN(:,:,:) = 0.0
   vhTrANN(:,:,:) = 0.0
+
+  nk_linear = max(GV%nkml, 1)
 
   ! Allocate the local stencil variables
   allocate(dhdx_local(CS%ann_window, CS%ann_window), dhdy_local(CS%ann_window, CS%ann_window), &
@@ -123,7 +130,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
 
   ! Calculate the h gradients in full 3D domain
   if (use_EOS) then
-    call h_gradients_EOS(h, G, GV, US, dhdx, dhdy, CS, tv, dt)
+    call h_gradients_EOS(h, G, GV, US, dhdx, dhdy, CS, tv, dt, slope_x, slope_y)
   else
     call h_gradients(h, G, GV, dhdx, dhdy, CS)
   endif
@@ -286,20 +293,45 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
 
   enddo
 
+  ! Convert the fluxes to stream function 
+  do k=nz,1,-1
+    do j=js,je ; do i=is-1,ie
+      Sfn_unlim_u(I,j,k) = Sfn_unlim_u(I,j,k+1) + uhTrANN(I,j,k) 
+    enddo ; enddo
+    do j=js-1,je ; do i=is,ie
+      Sfn_unlim_v(i,J,k) = Sfn_unlim_v(i,J,k+1) + vhTrANN(i,J,k)
+    enddo ; enddo
+  enddo
+
+
   ! Apply flux limiters
   if (CS%limit_upslope_flow) then
-    call upslope_limiter(h, uhTrANN, vhTrANN, G, GV, US, CS, tv)
+    call upslope_limiter(h, Sfn_unlim_u, Sfn_unlim_v, G, GV, US, CS, tv)
+    !call upslope_limiter_old(h, uhTrANN, vhTrANN, G, GV, US, CS, tv)
   endif
+
+
 
    !> Apply the no- BT flow condition (for 2 layers)
   ! There are many ways to do this, and we made simplest seeming adhoc choice.
   if (CS%remove_barotropic_flux) then
-    uhTrANN(:,:,1) = - uhTrANN(:,:,2) 
-    vhTrANN(:,:,1) = - vhTrANN(:,:,2)
+    do k =1,nk_linear
+      Sfn_unlim_u(:,:,k) = 0.0
+      Sfn_unlim_v(:,:,k) = 0.0
+    enddo
+    !uhTrANN(:,:,1) = - uhTrANN(:,:,2) 
+    !vhTrANN(:,:,1) = - vhTrANN(:,:,2)
   endif
 
+  ! TODO : This is where to include the FGNV smoothing 
+
+
   ! Seems like a good idea to call this unconditionally.
-  call squeeze_limiter(h, uhTrANN, vhTrANN, dt, G, Gv, CS)
+  !call squeeze_limiter_old(h, uhTrANN, vhTrANN, dt, G, Gv, CS)
+  call squeeze_limiter(h, uhTrANN, vhTrANN, Sfn_unlim_u, Sfn_unlim_v, slope_x, slope_y, dt, G, Gv, CS, tv)
+
+  ! Compute transport from flux limited streamfunction
+ 
 
 
   !if (CS%id_dhdx > 0) write(*,*) 'Here', dhdx(2,2,2)
@@ -448,9 +480,8 @@ subroutine calc_rotation_matrix(frame_vec_x, frame_vec_y, R_11, R_12, R_21, R_22
 
 end subroutine calc_rotation_matrix
 
-
 !> Calculate thickness gradients when EOS is used.
-subroutine h_gradients_EOS(h, G, GV, US, dhdx, dhdy, CS, tv, dt)
+subroutine h_gradients_EOS(h, G, GV, US, dhdx, dhdy, CS, tv, dt, slope_x, slope_y)
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
@@ -459,13 +490,13 @@ subroutine h_gradients_EOS(h, G, GV, US, dhdx, dhdy, CS, tv, dt)
   type(thickness_flux_ann_CS),                intent(in)    :: CS !< Control structure for thickness_flux_ann
   type(thermo_var_ptrs),                      intent(in)    :: tv    !< Thermodynamics structure
   real,                                       intent(in)    :: dt     !< Time increment [T ~> s]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), intent(out)    :: slope_x !< Zonal isoneutral slope [Z L-1 ~> nondim]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), intent(out)    :: slope_y !< Meridional isoneutral slope [Z L-1 ~> nondim]
+  
   ! Local variables
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)     :: e    ! The interface heights relative to mean sea level [Z ~> m]
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1)    :: slope_x !< Zonal isoneutral slope [Z L-1 ~> nondim]
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1)    :: slope_y !< Meridional isoneutral slope
-                                                                         !! [Z L-1 ~> nondim]
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: dhdx_u
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: dhdy_v
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)     :: e    ! The interface heights relative to mean sea level [Z ~> m]
    
   logical :: use_stanley
   integer :: is, ie, js, je
@@ -691,7 +722,68 @@ end subroutine vel_gradients
 !> The physicality of this is arguable, but if not used leads to numerical issues.
 !> Some energetics based schemes may help remove this strict condition in future. 
 !> Tendencies from the resolved part of the flow may still be able to move isopycnals relative to topo (as they should).
-subroutine upslope_limiter(h, uhTrANN, vhTrANN, G, Gv, US, CS, tv) 
+subroutine upslope_limiter(h, Sfn_unlim_u, Sfn_unlim_v, G, Gv, US, CS, tv) 
+  type(ocean_grid_type), intent(in) :: G
+  type(verticalGrid_type), intent(in) :: GV
+  type(unit_scale_type), intent(in) :: US
+  type(thermo_var_ptrs),                      intent(in)    :: tv     !< Thermodynamics structure
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(in) :: h !< Layer thickness [H ~> m or kg m-2]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), intent(inout)   :: Sfn_unlim_u
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), intent(inout)   :: Sfn_unlim_v
+  type(thickness_flux_ann_CS), intent(in) :: CS !< Control structure for thickness_flux_ann
+
+  real :: e(SZI_(G),SZJ_(G),SZK_(GV)+1) ! heights of interfaces, relative to mean
+                                         ! sea level [Z ~> m], positive up.
+  integer :: i, j, k, is, ie, js, je, nz
+  real :: dz_neglect
+
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+
+  dz_neglect = GV%dZ_subroundoff
+
+  ! Calculates interface heights, e, in [Z ~> m].
+  call find_eta(h, tv, G, GV, US, e, halo_size=1)
+
+  do k=1, nz
+    
+    do j=js, je ; do I=is-1, ie
+      if (Sfn_unlim_u(I,j,k) > 0.0) then ! if flow to the east
+        if (e(i,j,K) < e(i+1,j,nz+1)) then ! if fully blocked by topography to the east
+          Sfn_unlim_u(I,j,k) = 0.0
+        elseif (e(i,j,K+1) < e(i+1,j,nz+1)) then! if partially blocked by topography to the east
+          Sfn_unlim_u(I,j,k) = Sfn_unlim_u(I,j,k) * ((e(i,j,K) - e(i+1,j,nz+1)) / (h(i,j,k) + dz_neglect))
+        endif 
+      else ! if flow to the west
+        if (e(i,j,nz+1) > e(i+1,j,K)) then ! if fully blocked by topography to the west
+          Sfn_unlim_u(I,j,k) = 0.0
+        elseif (e(i,j,nz+1) > e(i+1,j,K+1) ) then ! if partially blocked by topography to the west
+          Sfn_unlim_u(I,j,k) = Sfn_unlim_u(I,j,k) * ((e(i+1,j,K) - e(i,j,nz+1)) / (h(i+1,j,k) + dz_neglect))
+        endif
+      endif
+    enddo ; enddo
+
+    do J=js-1, je ; do i=is, ie
+      if (Sfn_unlim_v(i,J,k) > 0.0) then ! if flow to the north
+        if (e(i,j,K) < e(i,j+1,nz+1)) then ! if fully blocked by topography to the north
+          Sfn_unlim_v(i,J,k) = 0.0
+        elseif (e(i,j,K+1) < e(i,j+1,nz+1)) then ! if partially blocked by topography to the north
+          Sfn_unlim_v(i,J,k) = Sfn_unlim_v(i,J,k) * ((e(i,j,K) - e(i,j+1,nz+1)) / (h(i,j,k) + dz_neglect))
+        endif
+      else ! if flow to the south
+        if (e(i,j,nz+1) > e(i,j+1,K)) then ! if fully blocked by topography to the south
+          Sfn_unlim_v(i,J,k) = 0.0
+        elseif (e(i,j,nz+1) > e(i,j+1,K+1)) then ! if partially blocked by topography to the south
+          Sfn_unlim_v(i,J,k) = Sfn_unlim_v(i,J,k) * ((e(i,j+1,K) - e(i,j,nz+1)) / (h(i,j+1,k) + dz_neglect))
+        endif
+      endif
+    enddo ; enddo
+
+  enddo
+    
+end subroutine upslope_limiter
+
+
+subroutine upslope_limiter_old(h, uhTrANN, vhTrANN, G, Gv, US, CS, tv) 
   type(ocean_grid_type), intent(in) :: G
   type(verticalGrid_type), intent(in) :: GV
   type(unit_scale_type), intent(in) :: US
@@ -750,11 +842,203 @@ subroutine upslope_limiter(h, uhTrANN, vhTrANN, G, Gv, US, CS, tv)
   enddo
     
 
-end subroutine upslope_limiter
+end subroutine upslope_limiter_old
 
 !> Apply a flux limiter that prevents ANN fluxes from making isopycnal thickness negative
 !> 
-subroutine squeeze_limiter(h, uhTrANN, vhTrANN, dt, G, Gv, CS)
+subroutine squeeze_limiter(h, uhTrANN, vhTrANN, Sfn_unlim_u, Sfn_unlim_v, slope_x, slope_y, dt, G, Gv, CS, tv)
+  type(ocean_grid_type), intent(in) :: G
+  type(verticalGrid_type), intent(in) :: GV
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(in) :: h !< Layer thickness [H ~> m or kg m-2]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(inout)   :: uhTrANN   !< Zonal ANN h transport u*h*dy [L2 H T-1 ~> m3 s-1 or kg s-1]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(inout)   :: vhTrANN   !< Meridional ANN h transport v*h*dx [L2 H T-1 ~> m3 s-1 or kg s-1]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), intent(in)   :: Sfn_unlim_u, slope_x
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), intent(in)   :: Sfn_unlim_v, slope_y
+  type(thickness_flux_ann_CS), intent(in) :: CS !< Control structure for thickness_flux_ann
+  type(thermo_var_ptrs),                      intent(in)    :: tv
+  real, intent(in) :: dt !< Time step [T ~> s]
+
+  !local variables
+  real :: slope2_Ratio_u(SZIB_(G),SZJ_(G), SZK_(GV)+1) ! The ratio of the slope squared to slope_max squared [nondim]
+  real :: slope2_Ratio_v(SZI_(G),SZJB_(G),SZK_(GV)+1)  ! The ratio of the slope squared to slope_max squared [nondim]
+  real :: uhtot(SZIB_(G),SZJ_(G))  ! The vertical sum of uhD [H L2 T-1 ~> m3 s-1 or kg s-1].
+  real :: vhtot(SZI_(G),SZJB_(G))  ! The vertical sum of vhD [H L2 T-1 ~> m3 s-1 or kg s-1].
+  integer :: i, j, k, is, ie, js, je, nz, nk_linear
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) ::  &
+    h_avail, &    ! The mass available for transport out of each face, divided
+                                                              ! by dt [H L2 T-1 ~> m3 s-1 or kg s-1].
+    h_frac        ! The fraction of the mass in the column above the bottom
+                                                              ! interface of a layer that is within a layer [nondim]. 0<h_frac<=1
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: &
+    h_avail_rsum  ! The running sum of h_avail above an interface [H L2 T-1 ~> m3 s-1 or kg s-1].
+  real :: I_slope_max2  ! The inverse of slope_max squared [L2 Z-2 ~> nondim].
+  real :: I4dt          ! 1 / 4 dt [T-1 ~> s-1].
+  real :: Sfn_safe      ! The streamfunction that goes linearly back to 0 at the surface
+                        ! [H L2 T-1 ~> m3 s-1 or kg s-1].  This is a good value to use when the
+                        ! slope is so large as to be meaningless, usually due to weak stratification.
+  real :: Sfn_est       ! A preliminary estimate (before limiting) of the overturning
+                        ! streamfunction [H L2 T-1 ~> m3 s-1 or kg s-1].
+  real :: Sfn_in_h      ! The overturning streamfunction [H L2 T-1 ~> m3 s-1 or kg s-1] (note that
+                        ! the units are different from other Sfn vars).
+  real :: Rho_avg
+  real :: Z_to_H        ! A conversion factor from heights to thicknesses, perhaps based on
+                        ! a spatially variable local density [H Z-1 ~> nondim or kg m-3]
+  real :: h_neglect ! A thickness that is so small it is usually lost
+                     ! in roundoff and can be neglected [H ~> m or kg m-2].
+  real :: hn_2          ! Half of h_neglect [H ~> m or kg m-2].
+  logical :: use_EOS    ! If true, density is calculated from T & S using an equation of state.
+
+  ! Initialize some useful variables
+  use_EOS = associated(tv%eqn_of_state)
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+  nk_linear = max(GV%nkml, 1)
+  h_neglect = GV%H_subroundoff
+  hn_2 = 0.5*h_neglect
+  I4dt = 0.25 / dt
+  I_slope_max2 = 1.0 / (CS%slope_max**2)
+  uhTrANN(:,:,:) = 0.0
+  vhTrANN(:,:,:) = 0.0
+
+  uhtot(:,:) = 0.0
+  vhtot(:,:) = 0.0
+  ! do j=js,je ; do I=is-1,ie
+  !   uhtot(I,j) = 0.0 
+  ! enddo ; enddo
+  ! do J=js-1,je ; do i=is,ie
+  !   vhtot(i,J) = 0.0 
+  ! enddo ; enddo
+
+  !
+  do j=js-1,je+1 ; do i=is-1,ie+1
+    h_avail_rsum(i,j,1) = 0.0
+    h_avail(i,j,1) = max(I4dt*G%areaT(i,j)*(h(i,j,1)-GV%Angstrom_H),0.0)
+    h_avail_rsum(i,j,2) = h_avail(i,j,1)
+    h_frac(i,j,1) = 1.0
+  enddo ; enddo
+  do j=js-1,je+1
+    do k=2,nz ; do i=is-1,ie+1
+      h_avail(i,j,k) = max(I4dt*G%areaT(i,j)*(h(i,j,k)-GV%Angstrom_H),0.0)
+      h_avail_rsum(i,j,k+1) = h_avail_rsum(i,j,k) + h_avail(i,j,k)
+      h_frac(i,j,k) = 0.0 ; if (h_avail(i,j,k) > 0.0) &
+        h_frac(i,j,k) = h_avail(i,j,k) / h_avail_rsum(i,j,k+1)
+    enddo ; enddo
+  enddo
+  
+  ! For the u points. 
+  do j=js,je
+    do K= nz, 2, -1
+      do I=is-1,ie
+        if (allocated(tv%SpV_avg) .and. (k > nk_linear) ) then
+          Rho_avg = ( ((h(i,j,k) + h(i,j,k-1)) + (h(i+1,j,k) + h(i+1,j,k-1))) + 4.0*hn_2 ) / &
+                ( (((h(i,j,k)+hn_2) * tv%SpV_avg(i,j,k))   + ((h(i,j,k-1)+hn_2) * tv%SpV_avg(i,j,k-1))) + &
+                  (((h(i+1,j,k)+hn_2)*tv%SpV_avg(i+1,j,k)) + ((h(i+1,j,k-1)+hn_2)*tv%SpV_avg(i+1,j,k-1))) )
+          ! Use an average density to convert the volume streamfunction estimate into a mass streamfunction.
+          Z_to_H = GV%RZ_to_H*Rho_avg
+        else
+          Z_to_H = GV%Z_to_H
+        endif
+
+        slope2_Ratio_u(I,j,K) = slope_x(I,j,K) * slope_x(I,j,K) * I_slope_max2 !! this probably does not need to be 3D field
+        if (slope2_Ratio_u(I,j,K) > 1.0e20) then
+          slope2_Ratio_u(I,j,K) = 1.0e20
+        end if
+
+        if (k > nk_linear) then
+          if (use_EOS) then
+            if (uhtot(I,j) <= 0.0) then
+              ! The transport that must balance the transport below is positive.
+              Sfn_safe = uhtot(I,j) * (1.0 - h_frac(i,j,k))
+            else !  (uhtot(I,j) > 0.0)
+              Sfn_safe = uhtot(I,j) * (1.0 - h_frac(i+1,j,k))
+            endif
+            ! Determine the actual streamfunction at each interface.
+            Sfn_est = (Z_to_H*Sfn_unlim_u(I,j,K) + slope2_Ratio_u(I,j,K)*Sfn_safe) / (1.0 + slope2_Ratio_u(I,j,K))
+          else  ! When use_EOS is false, the layers are constant density.
+            Sfn_est = Z_to_H*Sfn_unlim_u(I,j,K)
+          endif
+
+          ! Make sure that there is enough mass above to allow the streamfunction
+          ! to satisfy the boundary condition of 0 at the surface.
+          Sfn_in_H = min(max(Sfn_est, -h_avail_rsum(i,j,K)), h_avail_rsum(i+1,j,K))
+
+          ! The actual transport is limited by the mass available in the two
+          ! neighboring grid cells.
+          uhTrANN(I,j,k) = max(min((Sfn_in_H - uhtot(I,j)), h_avail(i,j,k)), &
+                           -h_avail(i+1,j,k))
+
+        else
+          if (uhtot(I,j) <= 0.0) then
+            uhTrANN(I,j,k) = -uhtot(I,j) * h_frac(i,j,k)
+          else !  (uhtot(I,j) > 0.0)
+            uhTrANN(I,j,k) = -uhtot(I,j) * h_frac(i+1,j,k)
+          endif
+        
+        endif
+      
+        uhtot(I,j) = uhtot(I,j) + uhTrANN(I,j,k)
+      
+      enddo 
+    enddo
+  enddo
+
+  do J=js-1,je 
+    do K= nz, 2, -1
+      do i=is,ie
+        if (allocated(tv%SpV_avg) .and.  (k > nk_linear) ) then
+          Rho_avg = ( ((h(i,j,k) + h(i,j,k-1)) + (h(i,j+1,k) + h(i,j+1,k-1))) + 4.0*hn_2 ) / &
+              ( (((h(i,j,k)+hn_2) * tv%SpV_avg(i,j,k))   + ((h(i,j,k-1)+hn_2) * tv%SpV_avg(i,j,k-1))) + &
+                (((h(i,j+1,k)+hn_2)*tv%SpV_avg(i,j+1,k)) + ((h(i,j+1,k-1)+hn_2)*tv%SpV_avg(i,j+1,k-1))) )
+          ! Use an average density to convert the volume streamfunction estimate into a mass streamfunction.
+          Z_to_H = GV%RZ_to_H*Rho_avg
+        else
+          Z_to_H = GV%Z_to_H
+        endif
+
+        slope2_Ratio_v(i,J,K) = slope_y(i,J,K) * slope_y(i,J,K) * I_slope_max2
+        if (slope2_Ratio_v(i,J,K) > 1.0e20) then
+          slope2_Ratio_v(i,J,K) = 1.0e20
+        end if
+
+        if (k > nk_linear) then
+          if (use_EOS) then
+            if (vhtot(i,J) <= 0.0) then
+              ! The transport that must balance the transport below is positive.
+              Sfn_safe = vhtot(i,J) * (1.0 - h_frac(i,j,k))
+            else !  (vhtot(I,j) > 0.0)
+              Sfn_safe = vhtot(i,J) * (1.0 - h_frac(i,j+1,k))
+            endif
+
+            ! Find the actual streamfunction at each interface.
+            Sfn_est = (Z_to_H*Sfn_unlim_v(i,J,K) + slope2_Ratio_v(i,J,K)*Sfn_safe) / (1.0 + slope2_Ratio_v(i,J,K))
+          else  ! When use_EOS is false, the layers are constant density.
+            Sfn_est = Z_to_H*Sfn_unlim_v(i,J,K)
+          endif
+
+          ! Make sure that there is enough mass above to allow the streamfunction
+          ! to satisfy the boundary condition of 0 at the surface.
+          Sfn_in_H = min(max(Sfn_est, -h_avail_rsum(i,j,K)), h_avail_rsum(i,j+1,K))
+
+          ! The actual transport is limited by the mass available in the two
+          ! neighboring grid cells.
+          vhTrANN(i,J,k) = max(min((Sfn_in_H - vhtot(i,J)), h_avail(i,j,k)), -h_avail(i,j+1,k))
+        else
+          if (vhtot(i,J) <= 0.0) then
+            vhTrANN(i,J,k) = -vhtot(i,J) * h_frac(i,j,k)
+          else !  (vhtot(i,J) > 0.0)
+            vhTrANN(i,J,k) = -vhtot(i,J) * h_frac(i,j+1,k)
+          endif
+        endif
+        vhtot(i,J) = vhtot(i,J) + vhTrANN(i,J,k)
+
+      enddo
+    enddo
+  enddo
+
+
+
+end subroutine squeeze_limiter
+
+subroutine squeeze_limiter_old(h, uhTrANN, vhTrANN, dt, G, Gv, CS)
   type(ocean_grid_type), intent(in) :: G
   type(verticalGrid_type), intent(in) :: GV
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(in) :: h !< Layer thickness [H ~> m or kg m-2]
@@ -792,7 +1076,7 @@ subroutine squeeze_limiter(h, uhTrANN, vhTrANN, dt, G, Gv, CS)
   enddo
       
 
-end subroutine squeeze_limiter
+end subroutine squeeze_limiter_old
 
 !> Init function
 ! Read parameters and register output fields.
@@ -844,6 +1128,9 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
                  "A diapycnal diffusivity that is used to interpolate "//&
                  "more sensible values of T & S into thin layers.", &
                  units="m2 s-1", default=1.0e-6, scale=GV%m2_s_to_HZ_T)
+  call get_param(param_file, mdl, "KHTH_SLOPE_MAX", CS%slope_max, &
+                 "A slope beyond which the calculated isopycnal slope is "//&
+                 "not reliable and is scaled away.", units="nondim", default=0.01, scale=US%L_to_Z)
 
   ! Initialize the ANN
   call ann_init(CS%ann_cs, CS%thickness_ann_num_layers, CS%thickness_ann_NNfile)
