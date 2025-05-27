@@ -50,6 +50,8 @@ type, public :: THICKNESS_FLUX_ANN_CS ; private
   integer :: id_h_mask
   integer :: id_Fx, id_Fy, id_uhTrANN, id_vhTrANN
   integer :: id_dudx, id_dudy, id_dvdx, id_dvdy
+  integer :: id_slope_x, id_slope_y !< IDs for the slopes
+  integer :: id_sfn_unlim_x, id_sfn_unlim_y
 
 end type THICKNESS_FLUX_ANN_CS
 
@@ -109,6 +111,12 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
 
   uhTrANN(:,:,:) = 0.0
   vhTrANN(:,:,:) = 0.0
+
+  slope_x(:,:,:) = 0.0
+  slope_y(:,:,:) = 0.0
+  
+  Sfn_unlim_u(:,:,:) = 0.0
+  Sfn_unlim_v(:,:,:) = 0.0
 
   nk_linear = max(GV%nkml, 1)
 
@@ -294,7 +302,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
   enddo
 
   ! Convert the fluxes to stream function 
-  do k=nz,1,-1
+  do k=nz,2,-1
     do j=js,je ; do i=is-1,ie
       Sfn_unlim_u(I,j,k) = Sfn_unlim_u(I,j,k+1) + uhTrANN(I,j,k) 
     enddo ; enddo
@@ -303,6 +311,18 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
     enddo ; enddo
   enddo
 
+  ! only for testing
+  ! if (CS%thickness_ann_model_type == "GM_ann") then
+  !   do k=nz,2,-1
+  !     do j=js,je ; do i=is-1,ie
+  !       Sfn_unlim_u(I,j,k) = -1000. *slope_x(I,j,k) * G%dyCu(I,j) * G%mask2dCu(I,j) !Sfn_unlim_u(I,j,k+1) + uhTrANN(I,j,k) 
+  !     enddo ; enddo
+  !     do j=js-1,je ; do i=is,ie
+  !       Sfn_unlim_v(i,J,k) = -1000. *slope_y(i,J,k) * G%dxCv(i,J) * G%mask2dCv(i,J) !Sfn_unlim_v(i,J,k+1) + vhTrANN(i,J,k)
+  !     enddo ; enddo
+  !   enddo
+  ! end if  
+
 
   ! Apply flux limiters
   if (CS%limit_upslope_flow) then
@@ -310,6 +330,8 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
     !call upslope_limiter_old(h, uhTrANN, vhTrANN, G, GV, US, CS, tv)
   endif
 
+  if (CS%id_sfn_unlim_x > 0) call post_data(CS%id_sfn_unlim_x, Sfn_unlim_u, CS%diag)
+  if (CS%id_sfn_unlim_y > 0) call post_data(CS%id_sfn_unlim_y, Sfn_unlim_v, CS%diag)
 
 
    !> Apply the no- BT flow condition (for 2 layers)
@@ -325,18 +347,34 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
 
   ! TODO : This is where to include the FGNV smoothing 
 
+  ! Convert the stream function back to fluxes 
+  ! (for testing some older code)
+  ! do k=nz,1,-1
+  !   do j=js,je ; do I=is-1,ie
+  !     uhTrANN(I,j,k) = Sfn_unlim_u(I,j,k) - Sfn_unlim_u(I,j,k+1)
+  !     !Sfn_unlim_u(I,j,k) = Sfn_unlim_u(I,j,k+1) + uhTrANN(I,j,k) 
+  !   enddo ; enddo
+  !   do J=js-1,je ; do i=is,ie
+  !     vhTrANN(i,J,k) = Sfn_unlim_v(i,J,k) - Sfn_unlim_v(i,J,k+1)
+  !     !Sfn_unlim_v(i,J,k) = Sfn_unlim_v(i,J,k+1) + vhTrANN(i,J,k)
+  !   enddo ; enddo
+  ! enddo
+
+
+  ! Compute transport from flux limited streamfunction and 
+  !> Apply the squeeze limiter to the streamfunction
 
   ! Seems like a good idea to call this unconditionally.
   !call squeeze_limiter_old(h, uhTrANN, vhTrANN, dt, G, Gv, CS)
   call squeeze_limiter(h, uhTrANN, vhTrANN, Sfn_unlim_u, Sfn_unlim_v, slope_x, slope_y, dt, G, Gv, CS, tv)
 
-  ! Compute transport from flux limited streamfunction
- 
-
-
+  
   !if (CS%id_dhdx > 0) write(*,*) 'Here', dhdx(2,2,2)
   if (CS%id_dhdx > 0) call post_data(CS%id_dhdx, dhdx, CS%diag)
   if (CS%id_dhdy > 0) call post_data(CS%id_dhdy, dhdy, CS%diag)
+  
+  if (CS%id_slope_x > 0) call post_data(CS%id_slope_x, slope_x, CS%diag)
+  if (CS%id_slope_y > 0) call post_data(CS%id_slope_y, slope_y, CS%diag)
 
   if (CS%id_dhbardx > 0 .and. CS%decompose_h_gradients) call post_data(CS%id_dhbardx, dhbardx, CS%diag)
   if (CS%id_dhbardy > 0 .and. CS%decompose_h_gradients) call post_data(CS%id_dhbardy, dhbardy, CS%diag)
@@ -915,12 +953,12 @@ subroutine squeeze_limiter(h, uhTrANN, vhTrANN, Sfn_unlim_u, Sfn_unlim_v, slope_
     h_avail_rsum(i,j,2) = h_avail(i,j,1)
     h_frac(i,j,1) = 1.0
   enddo ; enddo
-  do j=js-1,je+1
-    do k=2,nz ; do i=is-1,ie+1
+  do k=2,nz
+    do j=js-1,je+1; do i=is-1,ie+1
       h_avail(i,j,k) = max(I4dt*G%areaT(i,j)*(h(i,j,k)-GV%Angstrom_H),0.0)
       h_avail_rsum(i,j,k+1) = h_avail_rsum(i,j,k) + h_avail(i,j,k)
-      h_frac(i,j,k) = 0.0 ; if (h_avail(i,j,k) > 0.0) &
-        h_frac(i,j,k) = h_avail(i,j,k) / h_avail_rsum(i,j,k+1)
+      h_frac(i,j,k) = 0.0 
+      if (h_avail(i,j,k) > 0.0) h_frac(i,j,k) = h_avail(i,j,k) / h_avail_rsum(i,j,k+1)
     enddo ; enddo
   enddo
   
@@ -938,8 +976,8 @@ subroutine squeeze_limiter(h, uhTrANN, vhTrANN, Sfn_unlim_u, Sfn_unlim_v, slope_
           Z_to_H = GV%Z_to_H
         endif
 
-        slope2_Ratio_u(I,j,K) = slope_x(I,j,K) * slope_x(I,j,K) * I_slope_max2 !! this probably does not need to be 3D field
-        if (slope2_Ratio_u(I,j,K) > 1.0e20) then
+        slope2_Ratio_u(I,j,K) = slope_x(I,j,K)**2  * I_slope_max2 !! this probably does not need to be 3D field
+        if (slope2_Ratio_u(I,j,K) > 1.0e20) then ! Unlikely to happen, specially since default value of slope_max is 0.01 and slope is limited to be b/w -1 and 1
           slope2_Ratio_u(I,j,K) = 1.0e20
         end if
 
@@ -994,7 +1032,7 @@ subroutine squeeze_limiter(h, uhTrANN, vhTrANN, Sfn_unlim_u, Sfn_unlim_v, slope_
           Z_to_H = GV%Z_to_H
         endif
 
-        slope2_Ratio_v(i,J,K) = slope_y(i,J,K) * slope_y(i,J,K) * I_slope_max2
+        slope2_Ratio_v(i,J,K) = slope_y(i,J,K)**2 * I_slope_max2
         if (slope2_Ratio_v(i,J,K) > 1.0e20) then
           slope2_Ratio_v(i,J,K) = 1.0e20
         end if
@@ -1034,7 +1072,9 @@ subroutine squeeze_limiter(h, uhTrANN, vhTrANN, Sfn_unlim_u, Sfn_unlim_v, slope_
     enddo
   enddo
 
-
+  do j=js,je ; do I=is-1,ie ; uhTrANN(I,j,1) = -uhtot(I,j) ; enddo ; enddo
+  do J=js-1,je ; do i=is,ie ; vhTrANN(i,J,1) = -vhtot(i,J) ; enddo ; enddo
+  
 
 end subroutine squeeze_limiter
 
@@ -1140,6 +1180,12 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
               'Horizontal h gradient in x direction', 'm/m', conversion=US%Z_to_L/US%L_to_m )
   CS%id_dhdy = register_diag_field('ocean_model', 'dhdy', diag%axesTL, Time, &
               'Horizontal h gradient in y direction', 'm/m', conversion=US%Z_to_L/US%L_to_m )
+  
+  CS%id_slope_x = register_diag_field('ocean_model', 'ANN_slope_x', diag%axesCui, Time, &
+           'Zonal slope of neutral surface', 'nondim', conversion=US%Z_to_L)
+  CS%id_slope_y =  register_diag_field('ocean_model', 'ANN_slope_y', diag%axesCvi, Time, &
+           'Meridional slope of neutral surface', 'nondim', conversion=US%Z_to_L)
+
   CS%id_dhbardx = register_diag_field('ocean_model', 'dhbardx', diag%axesTL, Time, &
               'Horizontal h gradient due to bottom in x direction', 'm/m', conversion=US%Z_to_L/US%L_to_m )
   CS%id_dhbardy = register_diag_field('ocean_model', 'dhbardy', diag%axesTL, Time, &
@@ -1162,6 +1208,13 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
               'Meridional ANN h transport ~ v*h*dx', 'm3 s-1', conversion=US%L_to_m**3*US%s_to_T)
   CS%id_h_mask = register_diag_field('ocean_model', 'h_mask', diag%axesTL, Time, &
               'Mask based on the thickness', 'nondim', conversion=1.0)
+
+  CS%id_sfn_unlim_x =  register_diag_field('ocean_model', 'ANN_sfn_unlim_x', diag%axesCui, Time, &
+           'Parameterized Zonal Overturning Streamfunction before limiting/smoothing', &
+           'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
+  CS%id_sfn_unlim_y =  register_diag_field('ocean_model', 'ANN_sfn_unlim_y', diag%axesCvi, Time, &
+           'Parameterized Meridional Overturning Streamfunction before limiting/smoothing', &
+           'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
 
 
 end subroutine thickness_flux_ann_init
