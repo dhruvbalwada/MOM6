@@ -42,12 +42,14 @@ type, public :: THICKNESS_FLUX_ANN_CS ; private
   logical :: limit_upslope_flow !< If true, limit the upslope flow.
   real :: kappa_smooth    !< A diffusivity for smoothing T/S in vanished layers [H Z T-1 ~> m2 s-1 or kg m-1 s-1]
   real    :: slope_max           !< Slopes steeper than slope_max are limited in some way [Z L-1 ~> nondim]
+  real    :: delta_BL_top, delta_BL_bottom !< The delta for the boundary layer up and down [Z ~> m]
+  logical :: mask_boundary_layers !< If true, mask the boundary layers in the ANN output.
 
   type(diag_ctrl), pointer :: diag => NULL() !< structure used to regulate timing of diagnostics
 
   !! Diagnostic identifier
   integer :: id_dhdx, id_dhdy, id_dhbardx, id_dhbardy
-  integer :: id_h_mask
+  integer :: id_h_mask, id_boundary_mask 
   integer :: id_Fx, id_Fy, id_uhTrANN, id_vhTrANN
   integer :: id_dudx, id_dudy, id_dvdx, id_dvdy
   integer :: id_slope_x, id_slope_y !< IDs for the slopes
@@ -119,6 +121,7 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
   Sfn_unlim_v(:,:,:) = 0.0
 
   nk_linear = max(GV%nkml, 1)
+  !write(*,*) "nk_linear", nk_linear
 
   ! Allocate the local stencil variables
   allocate(dhdx_local(CS%ann_window, CS%ann_window), dhdy_local(CS%ann_window, CS%ann_window), &
@@ -154,8 +157,8 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
   
   !do k=1, nz
   do k=1, nz
-  !> Rotation, local normalize etc
-  !write(*,*) "k", k, shift, stencil_points
+   !> Rotation, local normalize etc
+   !write(*,*) "k", k, shift, stencil_points
     !> Calculate the fluxes at center points 
     do j=js-1,je+1 ; do i=is-1,ie+1
 
@@ -289,8 +292,20 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
       end if
 
     enddo ; enddo
+  enddo
   
-  !> Interpolate fluxes to u, v points
+  ! > vertically smooth the fluxes to remove edge effects
+  ! > Sort of trying to do a hacky version of FGNV 2010
+  ! with the  knowledge that smoothing fluxes is not the same
+  ! as smoothing streamfunction, but it is better than nothing.
+  if (CS%mask_boundary_layers) then
+    ! Smooth boundary layer fluxes
+    call smooth_fluxes_vertically(h, FxC, FyC, G, GV, CS, tv, US)
+  end if
+
+
+  do k=1, nz
+   !> Interpolate fluxes to u, v points
     ! > We multiply the ann coeff at this later stage, so the unchanged F can be used for diagnostics
     do j=js,je ; do i=is-1,ie
       uhTrANN(I,j,k) = 0.5 * (FxC(i,j,k) + FxC(i+1,j,k)) * G%dyCu(I,j) * G%mask2dCu(I,j) * CS%ann_coeff
@@ -300,6 +315,8 @@ subroutine thickness_flux_ann_full(h, u, v, uhTrANN, vhTrANN, G, GV, US, tv, CS,
     enddo ; enddo 
 
   enddo
+
+  
 
   ! Convert the fluxes to stream function 
   do k=nz,2,-1
@@ -518,6 +535,65 @@ subroutine calc_rotation_matrix(frame_vec_x, frame_vec_y, R_11, R_12, R_21, R_22
 
 end subroutine calc_rotation_matrix
 
+!> Smooth fluxes to remove edge effects.
+subroutine smooth_fluxes_vertically(h, FxC, FyC, G, GV, CS, tv, US)
+  type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
+  type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
+  type(thermo_var_ptrs),                      intent(in)    :: tv    !< Thermodynamics structure
+  type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
+  type(thickness_flux_ann_CS),                intent(in)    :: CS !< Control structure for thickness_flux_ann
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(inout) :: FxC
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(inout) :: FyC
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(in)    :: h      !< Layer thickness [H ~> m or kg m-2]
+
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)     :: e    ! The interface heights relative to mean sea level [Z ~> m]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV))     :: mask_diag   ! The interface heights relative to mean sea level [Z ~> m]
+  real :: z, mask
+  real :: D
+  real :: delta_BL_top, delta_BL_bottom, delta_ml, s
+  integer :: is, ie, js, je, nk_linear
+  !integer :: Isq, Ieq, Jsq, Jeq
+  integer :: nz
+  integer :: i, j, k
+
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+  call find_eta(h, tv, G, GV, US, e, halo_size=3)
+
+  nk_linear = max(GV%nkml, 1) ! what is this variable?
+
+  s = 50.0 
+  delta_BL_top =  CS%delta_BL_top + s
+  delta_BL_bottom = CS%delta_BL_bottom + s 
+   
+  do k=1,nz
+    do j=js-1,je+1 ; do i=is-1,ie+1
+      D = e(i,j,1) - e(i,j,nz+1) ! Mean sea level height, positive number
+      
+      ! If we want to use boundary layer depth
+      !delta_BL_top = e(i,j,nk_linear)
+      !delta_ml = e(i,j,1) - e(i,j,nk_linear + 1) + s  ! positive number, thickness of the mixed layer
+      delta_ml = delta_BL_top
+
+      z = 0.5*(e(i,j,k) + e(i,j,k+1)) - e(i,j,nz+1)  ! distance above the bottom interface, positive number
+
+      if (D > ( delta_ml + delta_BL_bottom)) then
+        mask = 0.5 * (tanh((z - delta_BL_bottom)/s) - tanh((z - ( D - delta_ml))/s))
+      else
+        mask = 0.0  ! completely mask very thin water columns
+      end if
+
+      !mask(i,j,k) = 0.5 * (tanh((z(i,j,k) - delta)/s) - tanh((z(i,j,k) - (H(i,j) - delta))/s))
+      FxC(i,j,k) = FxC(i,j,k) * mask
+      FyC(i,j,k) = FyC(i,j,k) * mask
+
+      mask_diag(i,j,k) = mask
+    enddo ; enddo
+  enddo ! end k loop
+
+  if (CS%id_boundary_mask > 0) call post_data(CS%id_boundary_mask, mask_diag, CS%diag)
+
+end subroutine smooth_fluxes_vertically
+
 !> Calculate thickness gradients when EOS is used.
 subroutine h_gradients_EOS(h, G, GV, US, dhdx, dhdy, CS, tv, dt, slope_x, slope_y)
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
@@ -570,8 +646,6 @@ subroutine h_gradients_EOS(h, G, GV, US, dhdx, dhdy, CS, tv, dt, slope_x, slope_
       dhdy(i,j,k) = 0.5 * (dhdy_v(i,J,k) + dhdy_v(i,J-1,k)) * G%mask2dT(i,j)
     enddo ; enddo
   enddo ! end k loop                                
-
-
 
 end subroutine h_gradients_EOS
 
@@ -1160,6 +1234,12 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
                      "If true, limit flux that pushes isopycnals upslope.", default=.false.)                                          
   call get_param(param_file, mdl, "h_min_mask", CS%h_min_mask, &
                       "Mask thickness below this thereshold in the ANN.", default=1.0, units="nondim")
+  call get_param(param_file, mdl, "mask_boundary_layers", CS%mask_boundary_layers, &
+                     "If true, masks flux in regions near boundaries", default=.false.)                     
+  call get_param(param_file, mdl, "delta_BL_top", CS%delta_BL_top, &
+                      "Upper boundary layer to be ignored", default=100.0, units="nondim")   
+  call get_param(param_file, mdl, "delta_BL_bottom", CS%delta_BL_bottom, &
+                      "Lower boundary layer to be ignored", default=500.0, units="nondim")
   call get_param(param_file, mdl, "h_mask_width", CS%h_mask_width, &
                       "Width of the mask transition in the ANN.", default=0.1, units="nondim")
   call get_param(param_file, mdl, "FGR_ANN", CS%FGR_ANN, &
@@ -1208,6 +1288,8 @@ subroutine thickness_flux_ann_init(Time, G, GV, US, param_file, diag, CS)
               'Meridional ANN h transport ~ v*h*dx', 'm3 s-1', conversion=US%L_to_m**3*US%s_to_T)
   CS%id_h_mask = register_diag_field('ocean_model', 'h_mask', diag%axesTL, Time, &
               'Mask based on the thickness', 'nondim', conversion=1.0)
+  CS%id_boundary_mask = register_diag_field('ocean_model', 'boundary_mask', diag%axesTL, Time, &
+              'Mask the boundary regions with steep slopes', 'nondim', conversion=1.0)            
 
   CS%id_sfn_unlim_x =  register_diag_field('ocean_model', 'ANN_sfn_unlim_x', diag%axesCui, Time, &
            'Parameterized Zonal Overturning Streamfunction before limiting/smoothing', &
