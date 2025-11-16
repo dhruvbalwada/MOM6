@@ -248,7 +248,10 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   enddo ; enddo
 
   ! Calculates interface heights, e, in [Z ~> m].
-  call find_eta(h, tv, G, GV, US, e, halo_size=1)
+  !call find_eta(h, tv, G, GV, US, e, halo_size=1)
+  ! DB <
+  call find_eta(h, tv, G, GV, US, e, halo_size=3)
+  ! DB >
 
   ! Set the diffusivities.
   !$OMP parallel default(shared)
@@ -538,7 +541,7 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
     endif
   ! DB < 
   elseif (CS%use_meso_sfn_ANN) then
-    call thickness_diffuse_full_ANN(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
+    call thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV, US, MEKE, CS, &
                                   int_slope_u, int_slope_v, &
                                   Sfn_unlim_u_3D=Sfn_unlim_u_3D, Sfn_unlim_v_3D=Sfn_unlim_v_3D)
   ! DB >
@@ -1100,7 +1103,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
 
             ! DB <
             if (CS%use_meso_sfn_ANN) then
-              Sfn_unlim_u(I,K) = Sfn_unlim_u_3D(I,j,k)
+              Sfn_unlim_u(I,K) = Sfn_unlim_u_3D(I,j,K)
             end if
             ! DB >
 
@@ -2258,7 +2261,7 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
                  "If true, use the ANN to compute the mesoscale streamfunction "//&
                  "for thickness diffusivity.", default=.false.) 
   if (CS%use_meso_sfn_ANN) then
-    call MOM_meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
+    call MOM_meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS%meso_sfn_ANN_CS)
   endif
   ! DB >
   call get_param(param_file, mdl, "KHTH", CS%Khth, &
