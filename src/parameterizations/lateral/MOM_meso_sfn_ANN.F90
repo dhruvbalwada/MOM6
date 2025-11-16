@@ -15,6 +15,7 @@ use MOM_domains,       only : create_group_pass, do_group_pass, group_pass_type,
 use MOM_domains,       only : To_North, To_East
 use MOM_domains,       only : pass_var, CORNER
 use MOM_ANN,           only : ANN_init, ANN_apply_array_sio, ANN_end, ANN_CS
+use MOM_ANN,           only : ANN_apply_vector_orig
 use MOM_isopycnal_slopes,      only : calc_isoneutral_slopes
 use MOM_variables,             only : thermo_var_ptrs
 
@@ -35,8 +36,11 @@ type, public :: MESO_SFN_ANN_CS; private
   character(len=40) :: meso_sfn_ann_model_type !< Type of ANN model (e.g. options GM_simple, GM_ann, GM_rotated_ann, nondim_ann).
   integer :: ann_window !< Size of the window used in the ANN model.
 
+  type(ANN_CS) :: ann_rho_flux !< ANN instance for off-diagonal and diagonal stress
+  character(len=200) :: ann_file_rho_flux !< Path to netcdf file with ANN
+
   type(diag_ctrl), pointer :: diag => NULL() !< structure used to regulate timing of diagnostics
-  !! Diagnostic identifiers
+  !! Diagnostic identifiers 
   integer :: id_drdx_u, id_drdy_v !< Diagnostic ids for density gradients at u and v points.
   integer :: id_drdz_u, id_drdz_v !< Diagnostic ids for density gradients at u and v points.
   integer :: id_drdx_c, id_drdy_c
@@ -177,10 +181,12 @@ subroutine MOM_meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt)
         x(2) = drdy_c(i,j,k)
 
         ! TODO: Call the ANN 
-
-        ! temp fix 
-        y(1) = -1000.0 * x(1)
-        y(2) = -1000.0 * x(2)
+        call ANN_apply_vector_orig(x,y, CS%ann_rho_flux)
+        
+        ! temp fix that works like GM
+        ! use in place of above ANN call for testing
+        !y(1) = -1000.0 * x(1)
+        !y(2) = -1000.0 * x(2)
         ! End temp fix
 
       end if
@@ -293,10 +299,17 @@ subroutine MOM_meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
                  "more sensible values of T & S into thin layers.", &
                  units="m2 s-1", default=1.0e-6, scale=GV%m2_s_to_HZ_T)
   call get_param(param_file, mdl, "meso_sfn_ann_type", CS%meso_sfn_ann_model_type, &
-                      "Type of ANN model (e.g. options GM_simple, GM_ann, GM_rotated_ann, nondim_ann).", default="GM_simple")
-  call get_param(param_file, mdl, "meso_sfn_ann_window", CS%ann_window, &
-                        "Number of horizontal grid points to use in the thickness flux ANN window", default=1)
+                      "Type of ANN model (e.g. options GM_simple, GM_ann).", default="GM_simple")
+  
 
+  if (CS%meso_sfn_ann_model_type /= "GM_simple") then
+    call get_param(param_file, mdl, "meso_sfn_ann_window", CS%ann_window, &
+                        "Number of horizontal grid points to use in the thickness flux ANN window", default=1)
+    call get_param(param_file, mdl, "meso_sfn_ann_file", CS%ann_file_rho_flux, &
+                 "ANN parameters for prediction of density fluxes (netcdf)", &
+                 default="INPUT/rho_flux.nc")
+    call ANN_init(CS%ann_rho_flux, CS%ann_file_rho_flux)
+  endif
 
   ! Register diagnostic fields
   CS%id_drdx_u = register_diag_field('ocean_model', 'meso_sfn_drdx_u', diag%axesCui, Time, &
@@ -344,6 +357,11 @@ subroutine MOM_meso_sfn_ANN_end(CS)
   type(MESO_SFN_ANN_CS), intent(inout) :: CS !< Control structure
 
   ! Deallocate anything that needs to be. 
+
+  
+  if (CS%meso_sfn_ann_model_type /= "GM_simple") then
+    call ANN_end(CS%ann_rho_flux)
+  endif
 
 end subroutine MOM_meso_sfn_ANN_end
 

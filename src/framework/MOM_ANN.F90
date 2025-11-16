@@ -86,9 +86,17 @@ subroutine ANN_init(CS, NNfile)
   ! Read the number of layers
   call MOM_read_data(NNfile, "num_layers", num_layers)
 
+  ! DB <
+  print *, "Num layers", num_layers
+  ! DB >
+
   ! Read size of layers
   allocate( layer_sizes(num_layers) )
   call MOM_read_data(NNfile, "layer_sizes", layer_sizes)
+
+  ! DB <
+  print *, 'layer sizes', layer_sizes
+  ! DB >
 
   ! Allocates the memory for storing normalization, weights and biases
   call ANN_allocate(CS, num_layers, layer_sizes)
@@ -118,9 +126,15 @@ subroutine ANN_init(CS, NNfile)
     call MOM_read_data(NNfile, fieldname, CS%layers(i)%A, &
                         (/1,1,1,1/),(/CS%layers(i)%output_width,CS%layers(i)%input_width,1,1/))
 
+    ! DB <
+    print *, 'A', layer_num_str,  CS%layers(i)%A
+    ! DB >
     ! Reading bias b
     fieldname = trim('b') // trim(layer_num_str)
     call MOM_read_data(NNfile, fieldname, CS%layers(i)%b)
+    ! DB <
+    print *, 'b', CS%layers(i)%b
+    ! DB >
   enddo
 
   ! No activation function for the last layer
