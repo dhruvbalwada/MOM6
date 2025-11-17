@@ -18,12 +18,13 @@ use MOM_ANN,           only : ANN_init, ANN_apply_array_sio, ANN_end, ANN_CS
 use MOM_ANN,           only : ANN_apply_vector_orig
 use MOM_isopycnal_slopes,      only : calc_isoneutral_slopes
 use MOM_variables,             only : thermo_var_ptrs
+use MOM_error_handler,        only : MOM_error,  FATAL
 
 implicit none ; private
 
 #include <MOM_memory.h>
 
-public :: MOM_meso_sfn_ANN_init, MOM_meso_sfn_ANN_compute, MOM_meso_sfn_ANN_end
+public :: meso_sfn_ANN_init, meso_sfn_ANN_compute, meso_sfn_ANN_end
 
 !> Control structure for meso-scale streamfunction ANN parameterization
 type, public :: MESO_SFN_ANN_CS; private
@@ -72,7 +73,7 @@ contains
 
 !> Calculate the meso-scale streamfunction ANN parameterization
 
-subroutine MOM_meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt)
+subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
@@ -83,9 +84,11 @@ subroutine MOM_meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt)
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), intent(out)   :: sfn_u  !< Meso-scale streamfunction on u-points [L2 T-1 ~> m2 s-1]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), intent(out)   :: sfn_v  !< Meso-scale streamfunction on v-points [L2 T-1 ~> m2 s-1]
   real,                                      intent(in)    :: dt     !< Model time step [T ~> s]
-  
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(in)    :: u      !< Zonal velocity [L T-1 ~> m s-1].
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(in)    :: v      !< Meridional velocity [L T-1 ~>
+
   ! Local variables
-  integer :: i, j, k, is, ie, js, je, nz
+  integer :: i, j, k, is, ie, js, je, nz, shift, stencil_points, ii, jj
 
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1) :: drdx_u, drdz_u !< Zonal density gradient at u-points [R L-1 ~> kg m-4]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1) :: drdy_v, drdz_v !< Meridional density gradient at v-points [R L-1 ~> kg m-4]
@@ -102,8 +105,14 @@ subroutine MOM_meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt)
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)  :: Fx_c !< Zonal density flux at center points [R L-1 ~> kg m-4]
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)  :: Fy_c !< Meridional density flux at center points [R L-1 ~> kg m-4]
 
-  real, dimension(2) :: x !< Input vector to the ANN
-  real, dimension(2) :: y !< Output vector from the ANN
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV))  :: dudx, dvdy, dudy, dvdx   ! components of the velocity gradient tensor on the i,j points (cell-center)
+
+  real, allocatable :: drdx_local(:,:), drdy_local(:,:)
+  real, allocatable :: dudx_local(:,:), dudy_local(:,:), dvdx_local(:,:), dvdy_local(:,:)
+  real, allocatable :: sh_xx_local(:,:), sh_xy_local(:,:), vort_local(:,:)
+  real :: vel_grad_mag, rho_grad_mag
+  real, allocatable :: x(:) !< Input vector to the ANN
+  real, allocatable :: y(:) !< Output vector from the ANN
 
   
   !real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)  :: upsilon_x, upsilon_y !< Stream function components at center points [L2 T-1 ~> m2 s-1] 
@@ -113,6 +122,22 @@ subroutine MOM_meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt)
 
   use_stanley = .false. ! Not using Stanley smoothing here.
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+
+  ! Allocate the local stencil variables
+  allocate(drdx_local(CS%ann_window, CS%ann_window), drdy_local(CS%ann_window, CS%ann_window), &
+           dudx_local(CS%ann_window, CS%ann_window), dudy_local(CS%ann_window, CS%ann_window), &
+           dvdx_local(CS%ann_window, CS%ann_window), dvdy_local(CS%ann_window, CS%ann_window), &
+           sh_xx_local(CS%ann_window, CS%ann_window), sh_xy_local(CS%ann_window, CS%ann_window), &
+           vort_local(CS%ann_window, CS%ann_window))
+
+  shift = (CS%ann_window-1)/2
+  stencil_points = CS%ann_window * CS%ann_window
+
+  if (CS%meso_sfn_ann_model_type == "nondim_rhoF_ann") then
+    allocate(x(stencil_points*5), y(2))
+  else
+    allocate(x(2), y(2))
+  endif
   
   slope_x(:,:,:) = 0.0
   slope_y(:,:,:) = 0.0
@@ -133,8 +158,6 @@ subroutine MOM_meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt)
   drdy_c(:,:,:) = 0.0
 
 
-
-
   ! Compute rho gradients 
   call calc_isoneutral_slopes(G, GV, US, h, e, tv, dt*CS%kappa_smooth, use_stanley, slope_x, slope_y, &
                               drdx_u=drdx_u, drdy_v=drdy_v, drdz_u=drdz_u, drdz_v=drdz_v, halo=3)
@@ -142,7 +165,11 @@ subroutine MOM_meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt)
   
   ! Interpolate the rho gradients to the center point 
   call center_grad_rho(drdx_u, drdy_v, drdx_c, drdy_c, G, GV, CS)
-  
+
+  ! Compute velocity gradients at center points 
+  call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
+
+  ! Post diagnostics
   if (CS%id_drdx_u > 0) call post_data(CS%id_drdx_u, drdx_u, CS%diag)
   if (CS%id_drdy_v > 0) call post_data(CS%id_drdy_v, drdy_v, CS%diag)
 
@@ -188,7 +215,55 @@ subroutine MOM_meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt)
         !y(1) = -1000.0 * x(1)
         !y(2) = -1000.0 * x(2)
         ! End temp fix
+      else if (CS%meso_sfn_ann_model_type == "nondim_rhoF_ann") then
+        drdx_local(:,:) = drdx_c(i-shift:i+shift,j-shift:j+shift,k)
+        drdy_local(:,:) = drdy_c(i-shift:i+shift,j-shift:j+shift,k)
+        ! Take the velocity gradients below the interface k
+        dudx_local(:,:) = dudx(i-shift:i+shift,j-shift:j+shift,k) 
+        dudy_local(:,:) = dudy(i-shift:i+shift,j-shift:j+shift,k)
+        dvdx_local(:,:) = dvdx(i-shift:i+shift,j-shift:j+shift,k)
+        dvdy_local(:,:) = dvdy(i-shift:i+shift,j-shift:j+shift,k)
 
+        ! Compute the strain rate tensor components and vorticity
+        sh_xx_local(:,:) = dudx_local(:,:) - dvdy_local(:,:)
+        sh_xy_local(:,:) = dudy_local(:,:) + dvdx_local(:,:)
+        vort_local(:,:)  = dvdx_local(:,:) - dudy_local(:,:)
+
+        ! Compute the magnitude of the velocity gradient tensor for the local stencil
+        rho_grad_mag = 0.0
+        vel_grad_mag = 0.0
+        do jj=1, CS%ann_window
+          do ii=1, CS%ann_window
+            rho_grad_mag = rho_grad_mag + drdx_local(ii,jj)**2 + drdy_local(ii,jj)**2
+            vel_grad_mag = vel_grad_mag + sh_xx_local(ii,jj)**2 + sh_xy_local(ii,jj)**2 + vort_local(ii,jj)**2
+          enddo
+        enddo
+        rho_grad_mag = sqrt(rho_grad_mag) + 1e-30
+        vel_grad_mag = sqrt(vel_grad_mag) + 1e-30
+
+        ! Normalize inputs 
+        drdx_local(:,:) = drdx_local(:,:) / rho_grad_mag
+        drdy_local(:,:) = drdy_local(:,:) / rho_grad_mag
+
+        sh_xx_local(:,:) = sh_xx_local(:,:)/ vel_grad_mag
+        sh_xy_local(:,:) = sh_xy_local(:,:)/ vel_grad_mag
+        vort_local(:,:) = vort_local(:,:)/ vel_grad_mag
+
+        ! Prepare input vector for ANN
+        x(1:stencil_points) = RESHAPE(drdx_local, (/stencil_points/))
+        x(stencil_points+1:2*stencil_points) = RESHAPE(drdy_local, (/stencil_points/))
+        x(2*stencil_points+1:3*stencil_points) = RESHAPE(sh_xx_local, (/stencil_points/))
+        x(3*stencil_points+1:4*stencil_points) = RESHAPE(sh_xy_local, (/stencil_points/))
+        x(4*stencil_points+1:5*stencil_points) = RESHAPE(vort_local, (/stencil_points/))
+
+        ! Call the ANN
+        call ANN_apply_vector_orig(x,y, CS%ann_rho_flux)
+
+        ! Dimensionalize the output
+        y(:) = y(:) * rho_grad_mag * vel_grad_mag * G%areaT(i,j)
+      else 
+        call MOM_error(FATAL, "meso_sfn_ANN_compute: Unknown meso_sfn_ann_model_type "//&
+                       trim(CS%meso_sfn_ann_model_type))
       end if
 
       Fx_c(i,j,k) = y(1) !* G%mask2dT(i,j) 
@@ -223,7 +298,7 @@ subroutine MOM_meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt)
   if (CS%id_sfn_v > 0) call post_data(CS%id_sfn_v, sfn_v, CS%diag)
 
 
-end subroutine MOM_meso_sfn_ANN_compute
+end subroutine meso_sfn_ANN_compute
 
 subroutine center_grad_rho(drdx_u, drdy_v, drdx_c, drdy_c, G, GV, CS)
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
@@ -273,9 +348,59 @@ subroutine center2uv(var1_c, var2_c, var1_u, var2_v, G, GV)
 
 end subroutine center2uv
 
+
+!> Calculates the velocity gradients at the center points in 3D.
+subroutine vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
+  type(ocean_grid_type),                     intent(in)    :: G   !< Ocean grid structure
+  type(verticalGrid_type),                   intent(in)    :: GV  !< The ocean's vertical grid structure.
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)),intent(in)    :: u   !< The zonal velocity [L T-1 ~> m s-1].
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)),intent(in)    :: v   !< The meridional velocity [L T-1 ~> m s-1].
+  ! Center points 
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(out) :: dudx, dvdy, dudy, dvdx   ! components of the velocity gradient tensor on the i,j points (cell-center)
+  type(MESO_SFN_ANN_CS), intent(in) :: CS !< Control structure for thickness_flux_ann
+      
+  ! Corner points
+  real, dimension(SZIB_(G), SZJB_(G),SZK_(GV)) :: dudy_q, dvdx_q   
+  integer :: is, ie, js, je
+  !integer :: Isq, Ieq, Jsq, Jeq
+  integer :: nz
+  integer :: i, j, k
+  integer :: shift
+  
+  ! Line 407 of MOM_hor_visc.F90
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+  !Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
+
+  shift = (CS%ann_window-1)/2
+
+  do k=1, nz
+    ! Copy code from MOM_hor_visc.F90
+    ! Calculate some velocity gradients at center points directly
+    do j=js-shift-1,je+shift+1 ; do i=is-shift-1,ie+shift+1 ! has halo 2 ! loops over c points
+      dudx(i,j,k) = G%IdxT(i,j)* (u(I,j,k) * G%mask2dCu(I,j)   - u(I-1,j,k) * G%mask2dCu(I-1,j)) * G%mask2dT(i,j)
+      dvdy(i,j,k) = G%IdyT(i,j)* (v(i,J,k) * G%mask2dCv(i,J)   - v(i,J-1,k) * G%mask2dCv(i,J-1)) * G%mask2dT(i,j)
+      ! the above masking ensures no-flow condition. 
+    enddo ; enddo
+
+    ! Calculate velocity gradients at corner points 
+    ! loops over q points (we don't use the soft convention of MOM6 for do loop indices here)
+    do j=js-shift-2,je+shift+1 ; do i=is-shift-2,ie+shift+1
+      dvdx_q(I,J,k) = G%IdxBu(I,J)*(v(i+1,J,k)  - v(i,J,k) ) * G%mask2dBu(I,J)
+      dudy_q(I,J,k) = G%IdyBu(I,J)*(u(I,j+1,k)  - u(I,j,k) ) * G%mask2dBu(I,J)
+      ! 
+    enddo ; enddo
+
+    ! interpolate corner grads to center points 
+    do j = js-shift-1, je+shift+1; do i = is-shift-1, ie+shift+1
+      dvdx(i,j,k) =  0.25 * (dvdx_q(I,J,k) + dvdx_q(I-1,J,k) + dvdx_q(I,J-1,k) + dvdx_q(I-1,J-1,k)) * G%mask2dT(i,j) 
+      dudy(i,j,k) =  0.25 * (dudy_q(I,J,k) + dudy_q(I-1,J,k) + dudy_q(I,J-1,k) + dudy_q(I-1,J-1,k)) * G%mask2dT(i,j) 
+    enddo; enddo 
+  enddo
+end subroutine vel_gradients
+
 !> Initializes the meso-scale streamfunction ANN parameterization
 !! 
-subroutine MOM_meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
+subroutine meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
   type(time_type),         intent(in) :: Time    !< Current model time
   type(ocean_grid_type),   intent(in) :: G       !< Ocean grid structure
   type(verticalGrid_type), intent(in) :: GV      !< Vertical grid structure
@@ -285,7 +410,7 @@ subroutine MOM_meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
   type(MESO_SFN_ANN_CS), intent(inout) :: CS !< Control structure for meso sfn ann
 
   ! Local variables 
-  character(len=40) :: mdl = "MOM_meso_sfn_ANN" ! This is module's name
+  character(len=40) :: mdl = "meso_sfn_ANN" ! This is module's name
 # include "version_variable.h"  
 
   CS%diag => diag
@@ -348,12 +473,12 @@ subroutine MOM_meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
   CS%id_sfn_v = register_diag_field('ocean_model', 'meso_sfn_unlim_v', diag%axesCvi, Time, &
            'Meso-scale streamfunction at v points', &
            'm2 s-1', conversion=US%L_to_m**2*US%s_to_T)
-end subroutine MOM_meso_sfn_ANN_init
+end subroutine meso_sfn_ANN_init
 
 
 !> Finalizes the meso-scale streamfunction ANN parameterization
 !! 
-subroutine MOM_meso_sfn_ANN_end(CS)
+subroutine meso_sfn_ANN_end(CS)
   type(MESO_SFN_ANN_CS), intent(inout) :: CS !< Control structure
 
   ! Deallocate anything that needs to be. 
@@ -363,6 +488,6 @@ subroutine MOM_meso_sfn_ANN_end(CS)
     call ANN_end(CS%ann_rho_flux)
   endif
 
-end subroutine MOM_meso_sfn_ANN_end
+end subroutine meso_sfn_ANN_end
 
 end module MOM_meso_sfn_ANN

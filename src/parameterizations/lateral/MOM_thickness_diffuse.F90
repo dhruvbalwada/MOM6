@@ -23,8 +23,8 @@ use MOM_unit_scaling,          only : unit_scale_type
 use MOM_variables,             only : thermo_var_ptrs, cont_diag_ptrs
 use MOM_verticalGrid,          only : verticalGrid_type
 ! DB < 
-use MOM_meso_sfn_ANN,        only : MOM_meso_sfn_ANN_compute, MESO_SFN_ANN_CS
-use MOM_meso_sfn_ANN,        only : MOM_meso_sfn_ANN_init, MOM_meso_sfn_ANN_end
+use MOM_meso_sfn_ANN,        only : meso_sfn_ANN_compute, MESO_SFN_ANN_CS
+use MOM_meso_sfn_ANN,        only : meso_sfn_ANN_init, meso_sfn_ANN_end
 ! DB >
 
 implicit none ; private
@@ -110,7 +110,7 @@ type, public :: thickness_diffuse_CS ; private
   logical :: use_stanley_gm      !< If true, also use the Stanley parameterization in MOM_thickness_diffuse
 
   ! DB < 
-  logical :: use_meso_sfn_ANN  !< If true, use the meso-scale streamfunction ANN parameterization
+  logical, public :: use_meso_sfn_ANN  !< If true, use the meso-scale streamfunction ANN parameterization
   type(MESO_SFN_ANN_CS) :: meso_sfn_ANN_CS !< Control structure for the meso-scale streamfunction ANN parameterization
   ! DB >
 
@@ -141,7 +141,10 @@ contains
 !> Calculates isopycnal height diffusion coefficients and applies isopycnal height diffusion
 !! by modifying to the layer thicknesses, h. Diffusivities are limited to ensure stability.
 !! Also returns along-layer mass fluxes used in the continuity equation.
-subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp, CS, STOCH)
+! DB <
+subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp, CS, STOCH, u, v)
+ !subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp, CS, STOCH)
+ ! DB >
   type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
@@ -157,6 +160,11 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   type(cont_diag_ptrs),                       intent(inout) :: CDp    !< Diagnostics for the continuity equation
   type(thickness_diffuse_CS),                 intent(inout) :: CS     !< Control structure for thickness_diffuse
   type(stochastic_CS),                        intent(inout) :: STOCH !< Stochastic control structure
+  ! DB <
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), optional, intent(in)    :: u      !< Zonal velocity [L T-1 ~> m s-1].
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), optional, intent(in)    :: v      !< Meridional velocity [L T-1 ~>
+  ! DB >
+
   ! Local variables
   real :: e(SZI_(G),SZJ_(G),SZK_(GV)+1) ! heights of interfaces, relative to mean
                                          ! sea level [Z ~> m], positive up.
@@ -202,6 +210,9 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
                                     ! to layer centers [L2 T-1 ~> m2 s-1]
   logical :: use_VarMix, Resoln_scaled, Depth_scaled, use_stored_slopes, khth_use_vert_struct, use_Visbeck
   logical :: use_QG_Leith
+  ! DB <
+  logical :: present_vel
+  ! DB >
   integer :: i, j, k, is, ie, js, je, nz
 
   if (.not. CS%initialized) call MOM_error(FATAL, "MOM_thickness_diffuse: "//&
@@ -217,6 +228,10 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   if (allocated(MEKE%GM_src)) then
     do j=js,je ; do i=is,ie ; MEKE%GM_src(i,j) = 0. ; enddo ; enddo
   endif
+
+  ! DB <
+  present_vel = PRESENT(u) .and. PRESENT(v)
+  ! DB >
 
   use_VarMix = .false. ; Resoln_scaled = .false. ; use_stored_slopes = .false.
   khth_use_vert_struct = .false. ; use_Visbeck = .false. ; use_QG_Leith = .false.
@@ -502,8 +517,9 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   endif
 
   ! DB <
-  if (CS%use_meso_sfn_ANN) then
-    call MOM_meso_sfn_ANN_compute(h, e, Sfn_unlim_u_3D, Sfn_unlim_v_3D, G, GV, US, tv, CS%meso_sfn_ANN_CS, dt)
+  if (CS%use_meso_sfn_ANN .and. present_vel) then
+    call meso_sfn_ANN_compute(h, e, Sfn_unlim_u_3D, Sfn_unlim_v_3D, G, GV, US, tv, &
+                              CS%meso_sfn_ANN_CS, dt, u, v)
   endif
   ! DB >
 
@@ -2261,7 +2277,7 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
                  "If true, use the ANN to compute the mesoscale streamfunction "//&
                  "for thickness diffusivity.", default=.false.) 
   if (CS%use_meso_sfn_ANN) then
-    call MOM_meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS%meso_sfn_ANN_CS)
+    call meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS%meso_sfn_ANN_CS)
   endif
   ! DB >
   call get_param(param_file, mdl, "KHTH", CS%Khth, &
