@@ -266,8 +266,10 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
                        trim(CS%meso_sfn_ann_model_type))
       end if
 
-      Fx_c(i,j,k) = y(1) !* G%mask2dT(i,j) 
-      Fy_c(i,j,k) = y(2) !* G%mask2dT(i,j)
+      Fx_c(i,j,k) = - y(1) !* G%mask2dT(i,j) 
+      Fy_c(i,j,k) = - y(2) !* G%mask2dT(i,j) 
+      ! I think the minus sign is needed because our friend Pavel
+      ! defined the fluxes as - u'rho' instead of u'rho'.
 
     enddo ; enddo
   end do
