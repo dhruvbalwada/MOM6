@@ -87,7 +87,7 @@ subroutine ANN_init(CS, NNfile)
   call MOM_read_data(NNfile, "num_layers", num_layers)
 
   ! DB <
-  print *, "Num layers", num_layers
+  !print *, "Num layers", num_layers
   ! DB >
 
   ! Read size of layers
@@ -95,7 +95,7 @@ subroutine ANN_init(CS, NNfile)
   call MOM_read_data(NNfile, "layer_sizes", layer_sizes)
 
   ! DB <
-  print *, 'layer sizes', layer_sizes
+  !print *, 'layer sizes', layer_sizes
   ! DB >
 
   ! Allocates the memory for storing normalization, weights and biases
@@ -127,13 +127,13 @@ subroutine ANN_init(CS, NNfile)
                         (/1,1,1,1/),(/CS%layers(i)%output_width,CS%layers(i)%input_width,1,1/))
 
     ! DB <
-    print *, 'A', layer_num_str,  CS%layers(i)%A
+    !print *, 'A', layer_num_str,  CS%layers(i)%A
     ! DB >
     ! Reading bias b
     fieldname = trim('b') // trim(layer_num_str)
     call MOM_read_data(NNfile, fieldname, CS%layers(i)%b)
     ! DB <
-    print *, 'b', CS%layers(i)%b
+    !print *, 'b', CS%layers(i)%b
     ! DB >
   enddo
 

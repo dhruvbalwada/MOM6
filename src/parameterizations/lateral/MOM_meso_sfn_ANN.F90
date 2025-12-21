@@ -39,6 +39,8 @@ type, public :: MESO_SFN_ANN_CS; private
 
   type(ANN_CS) :: ann_rho_flux !< ANN instance for off-diagonal and diagonal stress
   character(len=200) :: ann_file_rho_flux !< Path to netcdf file with ANN
+  real :: min_dist_from_boundary  !< Minimum distance from bottom for valid interface [Z]
+
 
   type(diag_ctrl), pointer :: diag => NULL() !< structure used to regulate timing of diagnostics
   !! Diagnostic identifiers 
@@ -119,8 +121,13 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
   real :: mag_grad !< Magnitude of density gradient at center points [R L-1 ~> kg m-4]
   real :: Kappa !< Dimensional diffusivity [L2 T-1 ~> m2 s-1]
   logical :: use_stanley
+  logical :: use_EOS
+  real :: dist_from_bot_a, dist_from_bot_b  ! Distance from interface to bottom [Z]
+  real :: dist_from_sfc_a, dist_from_sfc_b  ! Distance from interface to surface [Z]
+
 
   use_stanley = .false. ! Not using Stanley smoothing here.
+  use_EOS = associated(tv%eqn_of_state)
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
 
   ! Allocate the local stencil variables
@@ -159,9 +166,13 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
 
 
   ! Compute rho gradients 
-  call calc_isoneutral_slopes(G, GV, US, h, e, tv, dt*CS%kappa_smooth, use_stanley, slope_x, slope_y, &
+  if (use_EOS) then
+    call calc_isoneutral_slopes(G, GV, US, h, e, tv, dt*CS%kappa_smooth, use_stanley, slope_x, slope_y, &
                               drdx_u=drdx_u, drdy_v=drdy_v, drdz_u=drdz_u, drdz_v=drdz_v, halo=3)
-  
+  else
+    call calc_layered_density_gradients(G, GV, US, h, e, drdx_u, drdy_v, drdz_u, drdz_v, halo=3, &
+                                        min_dist_from_boundary=CS%min_dist_from_boundary)
+  end if
   
   ! Interpolate the rho gradients to the center point 
   call center_grad_rho(drdx_u, drdy_v, drdx_c, drdy_c, G, GV, CS)
@@ -278,16 +289,56 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
   call center2uv(Fx_c, Fy_c, Fx_u, Fy_v, G, GV)
 
 
+  ! do k=2, nz
+  !   do j=js,je ; do i=is-1,ie
+  !     mag_grad = sqrt( (US%Z_to_L*drdx_u(i,j,k))**2 + drdz_u(i,j,k)**2 )
+  !     sfn_u(I,j,k) = (Fx_u(i,j,k))/mag_grad * G%dy_Cu(I,j) * G%OBCmaskCu(I,j)
+  !   enddo ; enddo
+  !   do j=js-1,je ; do i=is,ie
+  !     mag_grad = sqrt( (US%Z_to_L*drdy_v(i,j,k))**2 + drdz_v(i,j,k)**2 )
+  !     sfn_v(i,J,k) = (Fy_v(i,j,k))/mag_grad * G%dx_Cv(i,J) * G%OBCmaskCv(i,J)
+  !   enddo ; enddo
+  ! enddo
+
   do k=2, nz
-    do j=js,je ; do i=is-1,ie
-      mag_grad = sqrt( (US%Z_to_L*drdx_u(i,j,k))**2 + drdz_u(i,j,k)**2 )
-      sfn_u(I,j,k) = (Fx_u(i,j,k))/mag_grad * G%dy_Cu(I,j) * G%OBCmaskCu(I,j)
+    do j=js,je ; do I=is-1,ie
+      ! In layered mode, skip interfaces at the bottom or surface
+      if (.not. use_EOS) then
+        dist_from_bot_a = e(i,j,K) - e(i,j,nz+1)
+        dist_from_bot_b = e(i+1,j,K) - e(i+1,j,nz+1)
+        dist_from_sfc_a = e(i,j,1) - e(i,j,K)
+        dist_from_sfc_b = e(i+1,j,1) - e(i+1,j,K)
+        if (dist_from_bot_a < CS%min_dist_from_boundary .or. &
+            dist_from_bot_b < CS%min_dist_from_boundary .or. &
+            dist_from_sfc_a < CS%min_dist_from_boundary .or. &
+            dist_from_sfc_b < CS%min_dist_from_boundary) then
+          sfn_u(I,j,k) = 0.0
+          cycle
+        endif
+      endif
+      mag_grad = sqrt( (US%Z_to_L*drdx_u(I,j,k))**2 + drdz_u(I,j,k)**2 )
+      sfn_u(I,j,k) = (Fx_u(I,j,k))/mag_grad * G%dy_Cu(I,j) * G%OBCmaskCu(I,j)
     enddo ; enddo
     do j=js-1,je ; do i=is,ie
+      if (.not. use_EOS) then
+        dist_from_bot_a = e(i,j,K) - e(i,j,nz+1)
+        dist_from_bot_b = e(i,j+1,K) - e(i,j+1,nz+1)
+        dist_from_sfc_a = e(i,j,1) - e(i,j,K)
+        dist_from_sfc_b = e(i,j+1,1) - e(i,j+1,K)
+        if (dist_from_bot_a < CS%min_dist_from_boundary .or. &
+            dist_from_bot_b < CS%min_dist_from_boundary .or. &
+            dist_from_sfc_a < CS%min_dist_from_boundary .or. &
+            dist_from_sfc_b < CS%min_dist_from_boundary) then
+          sfn_v(i,J,k) = 0.0
+          cycle
+        endif
+      endif
       mag_grad = sqrt( (US%Z_to_L*drdy_v(i,j,k))**2 + drdz_v(i,j,k)**2 )
       sfn_v(i,J,k) = (Fy_v(i,j,k))/mag_grad * G%dx_Cv(i,J) * G%OBCmaskCv(i,J)
     enddo ; enddo
   enddo
+
+
   ! Is the OBC mask similar to the regular one?
 
   if (CS%id_Fx_c > 0) call post_data(CS%id_Fx_c, Fx_c, CS%diag)
@@ -400,6 +451,131 @@ subroutine vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
   enddo
 end subroutine vel_gradients
 
+
+!> Compute density gradients from fixed layer densities and interface heights
+!! This is a workaround for running the ANN parameterization in pure layered
+!! mode (USE_EOS=False) where calc_isoneutral_slopes won't work.
+subroutine calc_layered_density_gradients(G, GV, US, h, e, &
+                                          drdx_u, drdy_v, drdz_u, drdz_v, halo, min_dist_from_boundary)
+  type(ocean_grid_type),                       intent(in)  :: G
+  type(verticalGrid_type),                     intent(in)  :: GV
+  type(unit_scale_type),                       intent(in)  :: US
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),   intent(in)  :: h   ! Layer thickness [H]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), intent(in)  :: e   ! Interface heights [Z]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), intent(out) :: drdx_u ! [R L-1]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), intent(out) :: drdy_v ! [R L-1]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), intent(out) :: drdz_u ! [R Z-1]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), intent(out) :: drdz_v ! [R Z-1]
+  integer,                                      intent(in)  :: halo
+  real,                                         intent(in)  :: min_dist_from_boundary  ! Threshold for boundaries [Z]
+
+  ! Local variables
+  real :: drho_k       ! Density difference across interface K [R]
+  real :: dz_u, dz_v   ! Vertical length scale at u,v points [Z]
+  real :: dedx, dedy   ! Interface slope [Z L-1]
+  real :: h_neglect    ! Small thickness [H]
+  real :: dist_from_bot_a, dist_from_bot_b  ! Distance from interface to bottom [Z]
+  real :: dist_from_sfc_a, dist_from_sfc_b  ! Distance from interface to surface [Z]
+  
+  integer :: i, j, k, is, ie, js, je, nz
+
+  is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
+  h_neglect = GV%H_subroundoff
+
+
+  ! Initialize to zero
+  drdx_u(:,:,:) = 0.0
+  drdy_v(:,:,:) = 0.0
+  drdz_u(:,:,:) = 0.0
+  drdz_v(:,:,:) = 0.0
+
+  ! Loop over interfaces (K=1 is surface, K=nz+1 is bottom)
+  do K = 2, nz
+    ! Density jump across this interface (from GV%Rlay - the target layer densities)
+    drho_k = GV%Rlay(k) - GV%Rlay(k-1)  ! [R ~> kg m-3]
+
+    ! --- U-points (zonal gradients) ---
+    do j = js-halo, je+halo
+      do I = is-1-halo, ie+halo
+
+        ! Check if interface is above bottom on both sides
+        ! e is negative (depth), e(nz+1) is the bottom, e(1) is the surface
+        dist_from_bot_a = e(i,j,K)   - e(i,j,nz+1)
+        dist_from_bot_b = e(i+1,j,K) - e(i+1,j,nz+1)
+        dist_from_sfc_a = e(i,j,1)   - e(i,j,K)
+        dist_from_sfc_b = e(i+1,j,1) - e(i+1,j,K)
+        
+        if (dist_from_bot_a > min_dist_from_boundary .and. &
+            dist_from_bot_b > min_dist_from_boundary .and. &
+            dist_from_sfc_a > min_dist_from_boundary .and. &
+            dist_from_sfc_b > min_dist_from_boundary .and. &
+            G%mask2dCu(I,j) > 0.5) then
+
+          ! Average thickness of layers above and below interface at u-point
+          dz_u = 0.25 * GV%H_to_Z * ( &
+                (h(i,j,k-1) + h(i,j,k)) + (h(i+1,j,k-1) + h(i+1,j,k)) )
+          dz_u = max(dz_u, GV%H_to_Z * h_neglect)
+
+          ! Interface height gradient (slope of isopycnal)
+          dedx = (e(i+1,j,K) - e(i,j,K)) * G%IdxCu(I,j)  ! [Z L-1]
+
+          ! In a layered model with tilted interfaces:
+          !   dρ/dx comes from the interface tilt: (Δρ across interface) * (∂η/∂x) / Δz
+          !   dρ/dz is simply Δρ / Δz
+          !
+          ! Physical interpretation: if interface tilts up to the east,
+          ! denser water (layer k) is lifted, creating ∂ρ/∂x < 0
+          
+          drdx_u(I,j,K) = drho_k * dedx / dz_u   ! [R L-1]
+          drdz_u(I,j,K) = - drho_k / dz_u          ! [R Z-1]
+
+          ! Apply land mask
+          drdx_u(I,j,K) = drdx_u(I,j,K) * (G%mask2dCu(I,j) * G%mask2dT(i,j) * G%mask2dT(i+1,j))
+          drdz_u(I,j,K) = drdz_u(I,j,K) * (G%mask2dCu(I,j) * G%mask2dT(i,j) * G%mask2dT(i+1,j))
+        else
+          ! Interface is at/near bottom or surface on at least one side - set gradients to zero
+          drdx_u(I,j,K) = 0.0
+          drdz_u(I,j,K) = 0.0
+        end if
+      enddo
+    enddo
+
+    ! --- V-points (meridional gradients) ---
+    do J = js-1-halo, je+halo
+      do i = is-halo, ie+halo
+        ! Check if interface is above bottom and below surface on both sides
+        dist_from_bot_a = e(i,j,K)   - e(i,j,nz+1)
+        dist_from_bot_b = e(i,j+1,K) - e(i,j+1,nz+1)
+        dist_from_sfc_a = e(i,j,1)   - e(i,j,K)
+        dist_from_sfc_b = e(i,j+1,1) - e(i,j+1,K)
+        
+        if (dist_from_bot_a > min_dist_from_boundary .and. &
+            dist_from_bot_b > min_dist_from_boundary .and. &
+            dist_from_sfc_a > min_dist_from_boundary .and. &
+            dist_from_sfc_b > min_dist_from_boundary .and. &
+            G%mask2dCv(i,J) > 0.5) then
+          
+          ! Interface is a real isopycnal on both sides - compute gradients
+          dz_v = 0.25 * GV%H_to_Z * ( &
+                 (h(i,j,k-1) + h(i,j,k)) + (h(i,j+1,k-1) + h(i,j+1,k)) )
+          dz_v = max(dz_v, GV%H_to_Z * h_neglect)
+
+          ! Interface height gradient
+          dedy = (e(i,j+1,K) - e(i,j,K)) * G%IdyCv(i,J)  ! [Z L-1]
+
+          drdy_v(i,J,K) = drho_k * dedy / dz_v   ! [R L-1]
+          drdz_v(i,J,K) = -drho_k / dz_v         ! [R Z-1]
+        else
+          ! Interface is at/near bottom or surface on at least one side, or masked
+          drdy_v(i,J,K) = 0.0
+          drdz_v(i,J,K) = 0.0
+        endif
+      enddo
+    enddo
+  enddo
+
+end subroutine calc_layered_density_gradients
+
 !> Initializes the meso-scale streamfunction ANN parameterization
 !! 
 subroutine meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
@@ -427,6 +603,11 @@ subroutine meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
                  units="m2 s-1", default=1.0e-6, scale=GV%m2_s_to_HZ_T)
   call get_param(param_file, mdl, "meso_sfn_ann_type", CS%meso_sfn_ann_model_type, &
                       "Type of ANN model (e.g. options GM_simple, GM_ann).", default="GM_simple")
+
+  call get_param(param_file, mdl, "MESO_SFN_MIN_DIST_BOUNDARY", CS%min_dist_from_boundary, &
+             "Minimum distance from surface or bottom for interface to be considered valid "//&
+             "for density gradient calculations in layered mode.", &
+             units="m", default=50.0, scale=US%m_to_Z)
   
 
   if (CS%meso_sfn_ann_model_type /= "GM_simple") then
