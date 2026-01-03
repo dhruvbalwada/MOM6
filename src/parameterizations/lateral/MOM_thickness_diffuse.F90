@@ -1119,7 +1119,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
 
             ! DB <
             if (CS%use_meso_sfn_ANN) then
-              Sfn_unlim_u(I,K) = Sfn_unlim_u_3D(I,j,K)
+              Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) + Sfn_unlim_u_3D(I,j,K)
             end if
             ! DB >
 
@@ -1155,7 +1155,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
 
             ! DB <
             if (CS%use_meso_sfn_ANN) then
-              Sfn_unlim_u(I,K) = Sfn_unlim_u_3D(I,j,K)
+              Sfn_unlim_u(I,K) = Sfn_unlim_u(I,K) + Sfn_unlim_u_3D(I,j,K)
             end if
 
             ! Adding this from above because with ANN we can have issues.
@@ -1473,7 +1473,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
 
             ! DB <
             if (CS%use_meso_sfn_ANN) then
-              Sfn_unlim_v(i,K) = Sfn_unlim_v_3D(i,J,k)
+              Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) +Sfn_unlim_v_3D(i,J,k)
             end if
             ! DB >
 
@@ -1509,7 +1509,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
 
             ! DB <
             if (CS%use_meso_sfn_ANN) then
-              Sfn_unlim_v(i,K) = Sfn_unlim_v_3D(i,J,k)
+              Sfn_unlim_v(i,K) = Sfn_unlim_v(i,K) + Sfn_unlim_v_3D(i,J,k)
             end if
             
             ! Avoid moving dense water upslope from below the level of

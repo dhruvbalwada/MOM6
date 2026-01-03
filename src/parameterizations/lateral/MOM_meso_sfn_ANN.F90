@@ -124,10 +124,11 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
   logical :: use_EOS
   real :: dist_from_bot_a, dist_from_bot_b  ! Distance from interface to bottom [Z]
   real :: dist_from_sfc_a, dist_from_sfc_b  ! Distance from interface to surface [Z]
-
+  real :: mag_grad_floor
 
   use_stanley = .false. ! Not using Stanley smoothing here.
   use_EOS = associated(tv%eqn_of_state)
+  mag_grad_floor = 1e-10 ! Minimum density gradient magnitude to avoid division by zero [R L-1 ~> kg m-4]
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
 
   ! Allocate the local stencil variables
@@ -271,7 +272,12 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
         call ANN_apply_vector_orig(x,y, CS%ann_rho_flux)
 
         ! Dimensionalize the output
-        y(:) = y(:) * rho_grad_mag * vel_grad_mag * G%areaT(i,j)
+        y(:) = y(:) * rho_grad_mag * vel_grad_mag * G%areaT(i,j) * CS%ann_coeff
+
+        ! Clamp ANN output to prevent extreme values
+        y(1) = max(-1.0e2, min(1.0e2, y(1)))
+        y(2) = max(-1.0e2, min(1.0e2, y(2)))
+
       else 
         call MOM_error(FATAL, "meso_sfn_ANN_compute: Unknown meso_sfn_ann_model_type "//&
                        trim(CS%meso_sfn_ann_model_type))
@@ -316,8 +322,16 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
           cycle
         endif
       endif
+      ! Skip if density gradient is too small (prevents division by ~zero)
       mag_grad = sqrt( (US%Z_to_L*drdx_u(I,j,k))**2 + drdz_u(I,j,k)**2 )
+      if (mag_grad < mag_grad_floor) then
+        sfn_u(I,j,k) = 0.0
+        cycle
+      endif
       sfn_u(I,j,k) = (Fx_u(I,j,k))/mag_grad * G%dy_Cu(I,j) * G%OBCmaskCu(I,j)
+
+      sfn_u(I,j,k) = max(-1.0e6, min(1.0e6, sfn_u(I,j,k)))
+
     enddo ; enddo
     do j=js-1,je ; do i=is,ie
       if (.not. use_EOS) then
@@ -333,8 +347,17 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
           cycle
         endif
       endif
+      ! Skip if density gradient is too small (prevents division by ~zero)
       mag_grad = sqrt( (US%Z_to_L*drdy_v(i,j,k))**2 + drdz_v(i,j,k)**2 )
+
+      if (mag_grad < mag_grad_floor) then
+        sfn_v(i,J,k) = 0.0
+        cycle
+      endif
+      
       sfn_v(i,J,k) = (Fy_v(i,j,k))/mag_grad * G%dx_Cv(i,J) * G%OBCmaskCv(i,J)
+      sfn_v(i,J,k) = max(-1.0e6, min(1.0e6, sfn_v(i,J,k)))
+      
     enddo ; enddo
   enddo
 
