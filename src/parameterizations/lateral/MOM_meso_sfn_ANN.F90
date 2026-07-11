@@ -19,6 +19,17 @@
 !! grid-independent. The volume-transport streamfunction passed back to
 !! thickness_diffuse is Upsilon * dy_Cu (or dx_Cv), matching MOM6's
 !! Sfn_unlim convention.
+!!
+!! The division by the local gradient is unbounded where the local gradient
+!! is small but the stencil-scale gradient scaling the ANN output is not
+!! (e.g. along coastlines), and there the answer is set by the clamps.
+!! MESO_SFN_UPSILON_FORM selects structurally bounded alternatives:
+!! STENCIL_GRAD replaces the horizontal part of the divisor with the same
+!! stencil norm that scales the ANN output, and SLOPE_STENCIL feeds the
+!! network stencils of bounded (sine-form) isopycnal slopes and reads the
+!! rescaled output directly as Upsilon, eliminating the division entirely.
+!! Both bounded forms limit the effective slope at MESO_SFN_SLOPE_MAX,
+!! mirroring the KHTH_SLOPE_MAX limit in GM.
 module MOM_meso_sfn_ANN
 
 use MOM_ANN,              only : ANN_init, ANN_apply_array_sio, ANN_end, ANN_CS
@@ -27,6 +38,7 @@ use MOM_error_handler,    only : MOM_error, FATAL
 use MOM_file_parser,      only : get_param, log_version, param_file_type
 use MOM_grid,             only : ocean_grid_type
 use MOM_isopycnal_slopes, only : calc_isoneutral_slopes
+use MOM_string_functions, only : uppercase
 use MOM_unit_scaling,     only : unit_scale_type
 use MOM_variables,        only : thermo_var_ptrs
 use MOM_verticalGrid,     only : verticalGrid_type
@@ -37,6 +49,12 @@ implicit none ; private
 #include <MOM_memory.h>
 
 public :: meso_sfn_ANN_init, meso_sfn_ANN_compute, meso_sfn_ANN_end
+
+!>@{ Integer encodings of MESO_SFN_UPSILON_FORM, the conversion from ANN output to Upsilon
+integer, parameter :: UPSILON_LOCAL_GRAD    = 0 !< Divide the flux by the local in-plane density gradient
+integer, parameter :: UPSILON_STENCIL_GRAD  = 1 !< Divide the flux by a stencil-aggregate density gradient
+integer, parameter :: UPSILON_SLOPE_STENCIL = 2 !< Predict Upsilon directly from slope-stencil inputs
+!>@}
 
 !> Control structure for meso-scale streamfunction ANN parameterization
 type, public :: MESO_SFN_ANN_CS; private
@@ -55,6 +73,11 @@ type, public :: MESO_SFN_ANN_CS; private
   real :: flux_clamp  !< Maximum magnitude of ANN output density flux [R L T-1 ~> kg m-2 s-1]
   real :: Upsilon_clamp !< Maximum magnitude of the velocity-scale streamfunction
                         !! Upsilon (Ferrari et al. 2010) [L Z T-1 ~> m2 s-1]
+  integer :: upsilon_form !< The form of the conversion from ANN output to Upsilon; one of
+                          !! UPSILON_LOCAL_GRAD (original), UPSILON_STENCIL_GRAD or
+                          !! UPSILON_SLOPE_STENCIL (bounded forms).
+  real :: slope_max !< The pointwise-equivalent slope magnitude at which the bounded conversion
+                    !! forms limit Upsilon, comparable to KHTH_SLOPE_MAX [Z L-1 ~> nondim]
   type(diag_ctrl), pointer :: diag => NULL() !< structure used to regulate timing of diagnostics
   ! Diagnostic identifiers
   integer :: id_drdx_u !< Diagnostic id for zonal density gradient at u-points.
@@ -69,6 +92,12 @@ type, public :: MESO_SFN_ANN_CS; private
   integer :: id_Fy_v   !< Diagnostic id for meridional density flux at v-points.
   integer :: id_sfn_u  !< Diagnostic id for volume streamfunction at u-points.
   integer :: id_sfn_v  !< Diagnostic id for volume streamfunction at v-points.
+  integer :: id_Ups_u = -1 !< Diagnostic id for Upsilon at u-points before clamping.
+  integer :: id_Ups_v = -1 !< Diagnostic id for Upsilon at v-points before clamping.
+  integer :: id_Ups_clamp_u = -1 !< Diagnostic id for the mask where MESO_UPSILON_CLAMP binds at u-points.
+  integer :: id_Ups_clamp_v = -1 !< Diagnostic id for the mask where MESO_UPSILON_CLAMP binds at v-points.
+  integer :: id_s_hat_u = -1 !< Diagnostic id for the effective stencil-aggregate slope at u-points.
+  integer :: id_s_hat_v = -1 !< Diagnostic id for the effective stencil-aggregate slope at v-points.
 end type MESO_SFN_ANN_CS
 
 contains
@@ -116,6 +145,31 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)  :: Fy_c !< Meridional density flux at
                                                        !! center points [R L T-1 ~> kg m-2 s-1]
 
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)  :: rho_norm_c !< Stencil norm of the horizontal density
+                                                             !! gradient at center points [R L-1 ~> kg m-4]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1) :: rho_norm_u !< rho_norm_c at u-points [R L-1 ~> kg m-4]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1) :: rho_norm_v !< rho_norm_c at v-points [R L-1 ~> kg m-4]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)  :: drdz_c !< Vertical density gradient at
+                                                         !! center points [R Z-1 ~> kg m-4]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)  :: s_x_c !< Sine-form (bounded) zonal isopycnal slope
+                                                        !! at center points [Z L-1 ~> nondim]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)  :: s_y_c !< Sine-form (bounded) meridional isopycnal slope
+                                                        !! at center points [Z L-1 ~> nondim]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)  :: Upsx_c !< Zonal Upsilon at center points in
+                                                         !! SLOPE_STENCIL mode [L Z T-1 ~> m2 s-1]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1)  :: Upsy_c !< Meridional Upsilon at center points in
+                                                         !! SLOPE_STENCIL mode [L Z T-1 ~> m2 s-1]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1) :: Ups_u !< Upsilon at u-points before clamping [L Z T-1 ~> m2 s-1]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1) :: Ups_v !< Upsilon at v-points before clamping [L Z T-1 ~> m2 s-1]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1) :: clamp_u !< 1 where MESO_UPSILON_CLAMP binds at u-points,
+                                                          !! 0 elsewhere [nondim]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1) :: clamp_v !< 1 where MESO_UPSILON_CLAMP binds at v-points,
+                                                          !! 0 elsewhere [nondim]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1) :: s_hat_u !< Effective stencil-aggregate slope at
+                                                          !! u-points [Z L-1 ~> nondim]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1) :: s_hat_v !< Effective stencil-aggregate slope at
+                                                          !! v-points [Z L-1 ~> nondim]
+
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudx !< du/dx at cell center [T-1 ~> s-1]
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dvdy !< dv/dy at cell center [T-1 ~> s-1]
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: dudy !< du/dy at cell center [T-1 ~> s-1]
@@ -123,8 +177,10 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
 
   real, dimension(SZI_(G),SZJ_(G)) :: norm_y !< Scaling coefficient for ANN outputs [R L-1 T-1 ~> kg m-4 s-1]
 
-  real, allocatable :: drdx_local(:,:) !< Local stencil of drdx [R L-1 ~> kg m-4]
-  real, allocatable :: drdy_local(:,:) !< Local stencil of drdy [R L-1 ~> kg m-4]
+  real, allocatable :: drdx_local(:,:) !< Local stencil of drdx [R L-1 ~> kg m-4], or of the
+                                       !! sine-form slope s_x in SLOPE_STENCIL mode [Z L-1 ~> nondim]
+  real, allocatable :: drdy_local(:,:) !< Local stencil of drdy [R L-1 ~> kg m-4], or of the
+                                       !! sine-form slope s_y in SLOPE_STENCIL mode [Z L-1 ~> nondim]
   real, allocatable :: dudx_local(:,:) !< Local stencil of du/dx [T-1 ~> s-1]
   real, allocatable :: dudy_local(:,:) !< Local stencil of du/dy [T-1 ~> s-1]
   real, allocatable :: dvdx_local(:,:) !< Local stencil of dv/dx [T-1 ~> s-1]
@@ -133,7 +189,10 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
   real, allocatable :: sh_xy_local(:,:) !< Local stencil of shear strain [T-1 ~> s-1]
   real, allocatable :: vort_local(:,:)  !< Local stencil of relative vorticity [T-1 ~> s-1]
   real :: vel_grad_mag !< Magnitude of velocity gradient tensor over stencil [T-1 ~> s-1]
-  real :: rho_grad_mag !< Magnitude of density gradient over stencil [R L-1 ~> kg m-4]
+  real :: rho_grad_mag !< Magnitude of density gradient over stencil [R L-1 ~> kg m-4], or of
+                       !! the slope stencil in SLOPE_STENCIL mode [Z L-1 ~> nondim]
+  real :: mag_grad3 !< Magnitude of the full 3-D density gradient at a center point [R Z-1 ~> kg m-4]
+  real :: s_norm    !< Stencil norm of the sine-form slopes, after limiting [Z L-1 ~> nondim]
   real, allocatable :: x(:,:) !< Input vector to the ANN
   real, allocatable :: y(:,:) !< Output vector from the ANN
   real, allocatable :: yy(:)   !< Local output vector from the ANN
@@ -148,6 +207,8 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
                             ! roundoff; used to prevent division by zero [R L-1 ~> kg m-4]
   real :: vel_grad_neglect  ! A velocity gradient magnitude so small it is lost in
                             ! roundoff; used to prevent division by zero [T-1 ~> s-1]
+  real :: slope_neglect     ! A slope magnitude so small it is lost in roundoff;
+                            ! used to prevent division by zero [Z L-1 ~> nondim]
 
   if (.not. CS%initialized) call MOM_error(FATAL, &
       "meso_sfn_ANN_compute: Module MOM_meso_sfn_ANN must be initialized before use.")
@@ -158,6 +219,7 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
 
   rho_grad_neglect = 1.0e-30 * US%kg_m3_to_R * US%L_to_m
   vel_grad_neglect = 1.0e-30 * US%T_to_s
+  slope_neglect = 1.0e-30 * US%L_to_Z
 
   ! Allocate the local stencil variables
   allocate(drdx_local(CS%ann_window, CS%ann_window), drdy_local(CS%ann_window, CS%ann_window), &
@@ -191,6 +253,13 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
   drdz_v(:,:,:) = 0.0
   drdx_c(:,:,:) = 0.0
   drdy_c(:,:,:) = 0.0
+
+  rho_norm_c(:,:,:) = 0.0 ; rho_norm_u(:,:,:) = 0.0 ; rho_norm_v(:,:,:) = 0.0
+  drdz_c(:,:,:) = 0.0 ; s_x_c(:,:,:) = 0.0 ; s_y_c(:,:,:) = 0.0
+  Upsx_c(:,:,:) = 0.0 ; Upsy_c(:,:,:) = 0.0
+  Ups_u(:,:,:) = 0.0 ; Ups_v(:,:,:) = 0.0
+  clamp_u(:,:,:) = 0.0 ; clamp_v(:,:,:) = 0.0
+  s_hat_u(:,:,:) = 0.0 ; s_hat_v(:,:,:) = 0.0
   ! Compute rho gradients
   if (use_EOS) then
     call calc_isoneutral_slopes(G, GV, US, h, e, tv, dt*CS%kappa_smooth, use_stanley, slope_x, slope_y, &
@@ -202,6 +271,22 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
 
   ! Interpolate the rho gradients to the center point
   call center_grad_rho(drdx_u, drdy_v, drdx_c, drdy_c, G, GV, CS)
+
+  if (CS%upsilon_form == UPSILON_SLOPE_STENCIL) then
+    ! Interpolate the vertical density gradient to center points and build sine-form
+    ! slope components, s = grad(rho) / |grad3(rho)|, following the bounded slope
+    ! definition in calc_isoneutral_slopes; |s| <= 1 pointwise by construction.
+    call center_drdz(drdz_u, drdz_v, drdz_c, G, GV, CS)
+    do K=1, nz+1
+      do j=js-shift-1,je+shift+1 ; do i=is-shift-1,ie+shift+1
+        mag_grad3 = sqrt( US%Z_to_L**2*(drdx_c(i,j,K)**2 + drdy_c(i,j,K)**2) + drdz_c(i,j,K)**2 )
+        if (mag_grad3 > 0.0) then
+          s_x_c(i,j,K) = drdx_c(i,j,K) / mag_grad3
+          s_y_c(i,j,K) = drdy_c(i,j,K) / mag_grad3
+        endif
+      enddo ; enddo
+    enddo
+  endif
 
   ! Compute velocity gradients at center points
   call vel_gradients(u, v, G, GV, dudx, dudy, dvdx, dvdy, CS)
@@ -221,8 +306,17 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
     m = 0
     do j = js-1, je+1 ; do i = is-1, ie+1
       m = m + 1
-      drdx_local(:,:) = drdx_c(i-shift:i+shift,j-shift:j+shift,K)
-      drdy_local(:,:) = drdy_c(i-shift:i+shift,j-shift:j+shift,K)
+      if (CS%upsilon_form == UPSILON_SLOPE_STENCIL) then
+        ! The density-gradient stencils are replaced by stencils of the bounded slopes.
+        ! Their normalized pattern is approximately unchanged (exactly, where the
+        ! stratification is uniform across the stencil), so the network trained on
+        ! normalized density gradients applies without retraining.
+        drdx_local(:,:) = s_x_c(i-shift:i+shift,j-shift:j+shift,K)
+        drdy_local(:,:) = s_y_c(i-shift:i+shift,j-shift:j+shift,K)
+      else
+        drdx_local(:,:) = drdx_c(i-shift:i+shift,j-shift:j+shift,K)
+        drdy_local(:,:) = drdy_c(i-shift:i+shift,j-shift:j+shift,K)
+      endif
       ! Take the velocity gradients below the interface K
       dudx_local(:,:) = dudx(i-shift:i+shift,j-shift:j+shift,k)
       dudy_local(:,:) = dudy(i-shift:i+shift,j-shift:j+shift,k)
@@ -246,9 +340,19 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
                          vort_local(ii,jj)*vort_local(ii,jj)
         enddo
       enddo
-      rho_grad_mag = sqrt(rho_grad_mag) + rho_grad_neglect
       vel_grad_mag = sqrt(vel_grad_mag) + vel_grad_neglect
-      norm_y(i,j) = rho_grad_mag * vel_grad_mag
+      if (CS%upsilon_form == UPSILON_SLOPE_STENCIL) then
+        rho_grad_mag = sqrt(rho_grad_mag) + slope_neglect
+        ! Limit the stencil-aggregate slope, as GM limits the slope with KHTH_SLOPE_MAX.
+        ! The factor of 3 converts the pointwise limit to the 9-point stencil norm.
+        s_norm = min(rho_grad_mag, 3.0*CS%slope_max)
+        ! Here norm_y rescales the ANN output directly to Upsilon [Z L-1 T-1 ~> s-1].
+        norm_y(i,j) = s_norm * vel_grad_mag
+      else
+        rho_grad_mag = sqrt(rho_grad_mag) + rho_grad_neglect
+        norm_y(i,j) = rho_grad_mag * vel_grad_mag
+        if (CS%upsilon_form == UPSILON_STENCIL_GRAD) rho_norm_c(i,j,K) = rho_grad_mag
+      endif
 
       ! Normalize inputs
       drdx_local(:,:) = drdx_local(:,:) / rho_grad_mag
@@ -278,19 +382,35 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
       ! an implicit contract with the training procedure.
       yy(:) = ((y(m,:) * norm_y(i,j)) * G%areaT(i,j)) * CS%ann_coeff
 
-      ! Clamp ANN output to prevent extreme values
-      yy(1) = max(-CS%flux_clamp, min(CS%flux_clamp, yy(1)))
-      yy(2) = max(-CS%flux_clamp, min(CS%flux_clamp, yy(2)))
+      if (CS%upsilon_form == UPSILON_SLOPE_STENCIL) then
+        ! Here yy is already the bounded velocity-scale streamfunction Upsilon, with
+        ! |Upsilon| <= |ANN| * 3*slope_max * vel_grad_mag * areaT * ann_coeff, so no
+        ! flux clamp is needed. The ANN outputs -u'rho', so we negate as below.
+        Upsx_c(i,j,K) = -yy(1)
+        Upsy_c(i,j,K) = -yy(2)
+      else
+        ! Clamp ANN output to prevent extreme values
+        yy(1) = max(-CS%flux_clamp, min(CS%flux_clamp, yy(1)))
+        yy(2) = max(-CS%flux_clamp, min(CS%flux_clamp, yy(2)))
 
-      ! The sign convention is that ANN outputs -u'rho', so we negate.
-      Fx_c(i,j,K) = -yy(1)
-      Fy_c(i,j,K) = -yy(2)
+        ! The sign convention is that ANN outputs -u'rho', so we negate.
+        Fx_c(i,j,K) = -yy(1)
+        Fy_c(i,j,K) = -yy(2)
+      endif
 
     enddo ; enddo
   enddo
 
-  ! Interpolate the density fluxes to u and v points.
-  call center2uv(Fx_c, Fy_c, Fx_u, Fy_v, G, GV)
+  ! Interpolate the density fluxes (or Upsilon in SLOPE_STENCIL mode) to u and v points.
+  if (CS%upsilon_form == UPSILON_SLOPE_STENCIL) then
+    call center2uv(Upsx_c, Upsy_c, Ups_u, Ups_v, G, GV)
+  else
+    call center2uv(Fx_c, Fy_c, Fx_u, Fy_v, G, GV)
+  endif
+  ! The stencil norms are interpolated with the same weights as the fluxes they scale,
+  ! so the flux-to-norm ratio in the conversion below remains bounded.
+  if (CS%upsilon_form == UPSILON_STENCIL_GRAD) &
+    call center2uv(rho_norm_c, rho_norm_c, rho_norm_u, rho_norm_v, G, GV)
 
   do K=2, nz
     do j=js,je ; do I=is-1,ie
@@ -308,14 +428,37 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
           cycle
         endif
       endif
-      ! Skip if density gradient is too small (prevents division by ~zero)
-      mag_grad = sqrt( US%Z_to_L**2*drdx_u(I,j,K)**2 + drdz_u(I,j,K)**2 )
-      if (mag_grad < CS%mag_grad_floor) then
-        sfn_u(I,j,K) = 0.0
-        cycle
-      endif
-      ! Velocity-scale (grid-independent) streamfunction, Upsilon in Ferrari et al. 2010.
-      Upsilon_u = (Fx_u(I,j,K)/mag_grad) * G%OBCmaskCu(I,j)
+      select case (CS%upsilon_form)
+      case (UPSILON_LOCAL_GRAD)
+        ! Skip if density gradient is too small (prevents division by ~zero)
+        mag_grad = sqrt( US%Z_to_L**2*drdx_u(I,j,K)**2 + drdz_u(I,j,K)**2 )
+        if (mag_grad < CS%mag_grad_floor) then
+          sfn_u(I,j,K) = 0.0
+          cycle
+        endif
+        ! Velocity-scale (grid-independent) streamfunction, Upsilon in Ferrari et al. 2010.
+        Upsilon_u = (Fx_u(I,j,K)/mag_grad) * G%OBCmaskCu(I,j)
+      case (UPSILON_STENCIL_GRAD)
+        ! As LOCAL_GRAD, but the horizontal part of the divisor is the stencil norm
+        ! that scales the ANN numerator, so Upsilon stays bounded even where the
+        ! local gradient vanishes.
+        mag_grad = sqrt( US%Z_to_L**2*rho_norm_u(I,j,K)**2 + drdz_u(I,j,K)**2 )
+        ! Limit the effective stencil-aggregate slope rho_norm_u/mag_grad, as GM limits
+        ! the slope with KHTH_SLOPE_MAX; the factor of 3 converts the pointwise limit
+        ! to the 9-point stencil norm.
+        mag_grad = max(mag_grad, rho_norm_u(I,j,K) / (3.0*CS%slope_max))
+        if (mag_grad < CS%mag_grad_floor) then
+          sfn_u(I,j,K) = 0.0
+          cycle
+        endif
+        s_hat_u(I,j,K) = rho_norm_u(I,j,K) / mag_grad
+        Upsilon_u = (Fx_u(I,j,K)/mag_grad) * G%OBCmaskCu(I,j)
+      case (UPSILON_SLOPE_STENCIL)
+        ! Upsilon was predicted directly from slope stencils; no division is needed.
+        Upsilon_u = Ups_u(I,j,K) * G%OBCmaskCu(I,j)
+      end select
+      Ups_u(I,j,K) = Upsilon_u
+      if (abs(Upsilon_u) > CS%Upsilon_clamp) clamp_u(I,j,K) = 1.0
       Upsilon_u = max(-CS%Upsilon_clamp, min(CS%Upsilon_clamp, Upsilon_u))
       sfn_u(I,j,K) = Upsilon_u * G%dy_Cu(I,j)
 
@@ -334,16 +477,37 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
           cycle
         endif
       endif
-      ! Skip if density gradient is too small (prevents division by ~zero)
-      mag_grad = sqrt( US%Z_to_L**2*drdy_v(i,J,K)**2 + drdz_v(i,J,K)**2 )
-
-      if (mag_grad < CS%mag_grad_floor) then
-        sfn_v(i,J,K) = 0.0
-        cycle
-      endif
-
-      ! Velocity-scale (grid-independent) streamfunction, Upsilon in Ferrari et al. 2010.
-      Upsilon_v = (Fy_v(i,J,K)/mag_grad) * G%OBCmaskCv(i,J)
+      select case (CS%upsilon_form)
+      case (UPSILON_LOCAL_GRAD)
+        ! Skip if density gradient is too small (prevents division by ~zero)
+        mag_grad = sqrt( US%Z_to_L**2*drdy_v(i,J,K)**2 + drdz_v(i,J,K)**2 )
+        if (mag_grad < CS%mag_grad_floor) then
+          sfn_v(i,J,K) = 0.0
+          cycle
+        endif
+        ! Velocity-scale (grid-independent) streamfunction, Upsilon in Ferrari et al. 2010.
+        Upsilon_v = (Fy_v(i,J,K)/mag_grad) * G%OBCmaskCv(i,J)
+      case (UPSILON_STENCIL_GRAD)
+        ! As LOCAL_GRAD, but the horizontal part of the divisor is the stencil norm
+        ! that scales the ANN numerator, so Upsilon stays bounded even where the
+        ! local gradient vanishes.
+        mag_grad = sqrt( US%Z_to_L**2*rho_norm_v(i,J,K)**2 + drdz_v(i,J,K)**2 )
+        ! Limit the effective stencil-aggregate slope rho_norm_v/mag_grad, as GM limits
+        ! the slope with KHTH_SLOPE_MAX; the factor of 3 converts the pointwise limit
+        ! to the 9-point stencil norm.
+        mag_grad = max(mag_grad, rho_norm_v(i,J,K) / (3.0*CS%slope_max))
+        if (mag_grad < CS%mag_grad_floor) then
+          sfn_v(i,J,K) = 0.0
+          cycle
+        endif
+        s_hat_v(i,J,K) = rho_norm_v(i,J,K) / mag_grad
+        Upsilon_v = (Fy_v(i,J,K)/mag_grad) * G%OBCmaskCv(i,J)
+      case (UPSILON_SLOPE_STENCIL)
+        ! Upsilon was predicted directly from slope stencils; no division is needed.
+        Upsilon_v = Ups_v(i,J,K) * G%OBCmaskCv(i,J)
+      end select
+      Ups_v(i,J,K) = Upsilon_v
+      if (abs(Upsilon_v) > CS%Upsilon_clamp) clamp_v(i,J,K) = 1.0
       Upsilon_v = max(-CS%Upsilon_clamp, min(CS%Upsilon_clamp, Upsilon_v))
       sfn_v(i,J,K) = Upsilon_v * G%dx_Cv(i,J)
 
@@ -352,14 +516,24 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
 
   call pass_vector(sfn_u, sfn_v, G%Domain)
 
-  if (CS%id_Fx_c > 0) call post_data(CS%id_Fx_c, Fx_c, CS%diag)
-  if (CS%id_Fy_c > 0) call post_data(CS%id_Fy_c, Fy_c, CS%diag)
+  if (CS%upsilon_form /= UPSILON_SLOPE_STENCIL) then
+    ! Density fluxes are not part of the SLOPE_STENCIL prediction path.
+    if (CS%id_Fx_c > 0) call post_data(CS%id_Fx_c, Fx_c, CS%diag)
+    if (CS%id_Fy_c > 0) call post_data(CS%id_Fy_c, Fy_c, CS%diag)
 
-  if (CS%id_Fx_u > 0) call post_data(CS%id_Fx_u, Fx_u, CS%diag)
-  if (CS%id_Fy_v > 0) call post_data(CS%id_Fy_v, Fy_v, CS%diag)
+    if (CS%id_Fx_u > 0) call post_data(CS%id_Fx_u, Fx_u, CS%diag)
+    if (CS%id_Fy_v > 0) call post_data(CS%id_Fy_v, Fy_v, CS%diag)
+  endif
 
   if (CS%id_sfn_u > 0) call post_data(CS%id_sfn_u, sfn_u, CS%diag)
   if (CS%id_sfn_v > 0) call post_data(CS%id_sfn_v, sfn_v, CS%diag)
+
+  if (CS%id_Ups_u > 0) call post_data(CS%id_Ups_u, Ups_u, CS%diag)
+  if (CS%id_Ups_v > 0) call post_data(CS%id_Ups_v, Ups_v, CS%diag)
+  if (CS%id_Ups_clamp_u > 0) call post_data(CS%id_Ups_clamp_u, clamp_u, CS%diag)
+  if (CS%id_Ups_clamp_v > 0) call post_data(CS%id_Ups_clamp_v, clamp_v, CS%diag)
+  if (CS%id_s_hat_u > 0) call post_data(CS%id_s_hat_u, s_hat_u, CS%diag)
+  if (CS%id_s_hat_v > 0) call post_data(CS%id_s_hat_v, s_hat_v, CS%diag)
 
   deallocate(drdx_local, drdy_local, dudx_local, dudy_local, dvdx_local, dvdy_local, &
              sh_xx_local, sh_xy_local, vort_local)
@@ -394,6 +568,38 @@ subroutine center_grad_rho(drdx_u, drdy_v, drdx_c, drdy_c, G, GV, CS)
   enddo
 
 end subroutine center_grad_rho
+
+!> Interpolate vertical density gradients from u- and v-points to cell centers.
+!! The average is renormalized by the number of wet contributing points so that
+!! land neighbors do not artificially weaken the stratification.
+subroutine center_drdz(drdz_u, drdz_v, drdz_c, G, GV, CS)
+  type(ocean_grid_type),                      intent(in)    :: G      !< Ocean grid structure
+  type(verticalGrid_type),                    intent(in)    :: GV     !< Vertical grid structure
+  type(MESO_SFN_ANN_CS),                intent(in) :: CS !< Control structure for thickness_flux_ann
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1), intent(in) :: drdz_u !< Vertical density gradient
+                                                                     !! at u-points [R Z-1 ~> kg m-4]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1), intent(in) :: drdz_v !< Vertical density gradient
+                                                                     !! at v-points [R Z-1 ~> kg m-4]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), intent(inout) :: drdz_c !< Vertical density gradient
+                                                                       !! at center [R Z-1 ~> kg m-4]
+
+  real :: wsum  ! Number of wet velocity points contributing to the average [nondim]
+  integer :: i, j, k, is, ie, js, je, nz, shift
+
+  is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
+
+  shift = (CS%ann_window-1)/2
+
+  do K=1, nz+1
+    do j=js-shift-1,je+shift+1 ; do i=is-shift-1,ie+shift+1
+      wsum = ((G%mask2dCu(I-1,j) + G%mask2dCu(I,j)) + (G%mask2dCv(i,J-1) + G%mask2dCv(i,J)))
+      drdz_c(i,j,K) = ((drdz_u(I-1,j,K)*G%mask2dCu(I-1,j) + drdz_u(I,j,K)*G%mask2dCu(I,j)) + &
+                       (drdz_v(i,J-1,K)*G%mask2dCv(i,J-1) + drdz_v(i,J,K)*G%mask2dCv(i,J))) &
+                      / max(wsum, 1.0) * G%mask2dT(i,j)
+    enddo ; enddo
+  enddo
+
+end subroutine center_drdz
 
 !> Interpolate two fields from cell centers to u- and v-points.
 subroutine center2uv(var1_c, var2_c, var1_u, var2_v, G, GV)
@@ -601,6 +807,7 @@ subroutine meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
 
   ! Local variables
   character(len=40) :: mdl = "meso_sfn_ANN" ! This is module's name
+  character(len=40) :: upsilon_form_str ! The string value of MESO_SFN_UPSILON_FORM
 # include "version_variable.h"
 
   CS%diag => diag
@@ -632,6 +839,34 @@ subroutine meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
              "Maximum magnitude of the velocity-scale mesoscale streamfunction "//&
              "(Upsilon in Ferrari et al. 2010).", &
              units="m2 s-1", default=15., scale=US%m_to_L*US%m_to_Z*US%T_to_s)
+  call get_param(param_file, mdl, "MESO_SFN_UPSILON_FORM", upsilon_form_str, &
+             "The form of the conversion from the ANN prediction to the velocity-scale "//&
+             "streamfunction Upsilon: \n"//&
+             "\t LOCAL_GRAD - divide the predicted density flux by the local in-plane \n"//&
+             "\t\t density gradient magnitude (original, unbounded form). \n"//&
+             "\t STENCIL_GRAD - divide the predicted density flux by a gradient magnitude \n"//&
+             "\t\t whose horizontal part is the stencil norm that scales the ANN output, \n"//&
+             "\t\t so that Upsilon is bounded; the effective slope is limited by \n"//&
+             "\t\t MESO_SFN_SLOPE_MAX. \n"//&
+             "\t SLOPE_STENCIL - feed the ANN stencils of bounded (sine-form) isopycnal \n"//&
+             "\t\t slopes and interpret the rescaled output directly as Upsilon, with \n"//&
+             "\t\t no division.", &
+             default="LOCAL_GRAD")
+  select case (uppercase(trim(upsilon_form_str)))
+    case ("LOCAL_GRAD")    ; CS%upsilon_form = UPSILON_LOCAL_GRAD
+    case ("STENCIL_GRAD")  ; CS%upsilon_form = UPSILON_STENCIL_GRAD
+    case ("SLOPE_STENCIL") ; CS%upsilon_form = UPSILON_SLOPE_STENCIL
+    case default
+      call MOM_error(FATAL, "meso_sfn_ANN_init: Unrecognized value of "//&
+                     "MESO_SFN_UPSILON_FORM = "//trim(upsilon_form_str))
+  end select
+  call get_param(param_file, mdl, "MESO_SFN_SLOPE_MAX", CS%slope_max, &
+             "The pointwise-equivalent isopycnal slope at which the bounded forms of "//&
+             "the flux-to-streamfunction conversion limit Upsilon; the limit on the "//&
+             "stencil-aggregate slope is 3 times this value. Values of 1 or larger "//&
+             "effectively disable the limiter. Comparable to KHTH_SLOPE_MAX.", &
+             units="nondim", default=0.01, scale=US%L_to_Z, &
+             do_not_log=(CS%upsilon_form==UPSILON_LOCAL_GRAD))
   call get_param(param_file, mdl, "MESO_SFN_ANN_WINDOW", CS%ann_window, &
                       "Number of horizontal grid points to use in the thickness flux ANN window", default=1)
   ! The stencil reads drdx_c(i-shift:i+shift,...) with shift=(ann_window-1)/2.
@@ -680,6 +915,24 @@ subroutine meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
   CS%id_sfn_v = register_diag_field('ocean_model', 'meso_sfn_unlim_v', diag%axesCvi, Time, &
            'Meso-scale volume streamfunction at v points', &
            'm3 s-1', conversion=US%Z_to_m*US%L_to_m**2*US%s_to_T)
+  CS%id_Ups_u = register_diag_field('ocean_model', 'meso_sfn_Upsilon_u', diag%axesCui, Time, &
+           'Velocity-scale mesoscale streamfunction at u points, before clamping', &
+           'm2 s-1', conversion=US%L_to_m*US%Z_to_m*US%s_to_T)
+  CS%id_Ups_v = register_diag_field('ocean_model', 'meso_sfn_Upsilon_v', diag%axesCvi, Time, &
+           'Velocity-scale mesoscale streamfunction at v points, before clamping', &
+           'm2 s-1', conversion=US%L_to_m*US%Z_to_m*US%s_to_T)
+  CS%id_Ups_clamp_u = register_diag_field('ocean_model', 'meso_sfn_Upsilon_clamp_u', diag%axesCui, Time, &
+           'Mask of points where MESO_UPSILON_CLAMP limits the streamfunction at u points', 'nondim')
+  CS%id_Ups_clamp_v = register_diag_field('ocean_model', 'meso_sfn_Upsilon_clamp_v', diag%axesCvi, Time, &
+           'Mask of points where MESO_UPSILON_CLAMP limits the streamfunction at v points', 'nondim')
+  if (CS%upsilon_form == UPSILON_STENCIL_GRAD) then
+    CS%id_s_hat_u = register_diag_field('ocean_model', 'meso_sfn_s_hat_u', diag%axesCui, Time, &
+             'Effective stencil-aggregate slope in the bounded Upsilon conversion at u points', &
+             'nondim', conversion=US%Z_to_L)
+    CS%id_s_hat_v = register_diag_field('ocean_model', 'meso_sfn_s_hat_v', diag%axesCvi, Time, &
+             'Effective stencil-aggregate slope in the bounded Upsilon conversion at v points', &
+             'nondim', conversion=US%Z_to_L)
+  endif
 
   CS%initialized = .true.
 end subroutine meso_sfn_ANN_init
