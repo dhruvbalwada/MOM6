@@ -28,7 +28,12 @@
 !! stencil norm that scales the ANN output, and SLOPE_STENCIL feeds the
 !! network stencils of bounded (sine-form) isopycnal slopes and reads the
 !! rescaled output directly as Upsilon, eliminating the division entirely.
-!! Both bounded forms limit the effective slope at MESO_SFN_SLOPE_MAX,
+!! SLOPE_CLAMP is like SLOPE_STENCIL but applies the slope limit to the
+!! INPUTS: the slope-vector magnitude the network sees is clamped at
+!! MESO_SFN_SLOPE_MAX (Perezhogin's input-space bound), rather than limiting
+!! only the output rescaling. The two dissociate whether the regularization
+!! acts on what the network knows or on what it is allowed to do.
+!! All bounded forms limit the effective slope at MESO_SFN_SLOPE_MAX,
 !! mirroring the KHTH_SLOPE_MAX limit in GM.
 module MOM_meso_sfn_ANN
 
@@ -54,6 +59,8 @@ public :: meso_sfn_ANN_init, meso_sfn_ANN_compute, meso_sfn_ANN_end
 integer, parameter :: UPSILON_LOCAL_GRAD    = 0 !< Divide the flux by the local in-plane density gradient
 integer, parameter :: UPSILON_STENCIL_GRAD  = 1 !< Divide the flux by a stencil-aggregate density gradient
 integer, parameter :: UPSILON_SLOPE_STENCIL = 2 !< Predict Upsilon directly from slope-stencil inputs
+integer, parameter :: UPSILON_SLOPE_CLAMP   = 3 !< As SLOPE_STENCIL, but the slope-vector magnitude fed
+                                                !! to the network is clamped at MESO_SFN_SLOPE_MAX
 !>@}
 
 !> Control structure for meso-scale streamfunction ANN parameterization
@@ -209,10 +216,15 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
                             ! roundoff; used to prevent division by zero [T-1 ~> s-1]
   real :: slope_neglect     ! A slope magnitude so small it is lost in roundoff;
                             ! used to prevent division by zero [Z L-1 ~> nondim]
+  real :: s_mag             ! Magnitude of the slope vector at a center point [Z L-1 ~> nondim]
+  logical :: slope_inputs   ! True for the forms that feed the network slope stencils
+                            ! (SLOPE_STENCIL and SLOPE_CLAMP) and read its output as Upsilon
 
   if (.not. CS%initialized) call MOM_error(FATAL, &
       "meso_sfn_ANN_compute: Module MOM_meso_sfn_ANN must be initialized before use.")
 
+  slope_inputs = (CS%upsilon_form == UPSILON_SLOPE_STENCIL) .or. &
+                 (CS%upsilon_form == UPSILON_SLOPE_CLAMP)
   use_stanley = .false. ! Not using Stanley smoothing here.
   use_EOS = associated(tv%eqn_of_state)
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
@@ -272,10 +284,12 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
   ! Interpolate the rho gradients to the center point
   call center_grad_rho(drdx_u, drdy_v, drdx_c, drdy_c, G, GV, CS)
 
-  if (CS%upsilon_form == UPSILON_SLOPE_STENCIL) then
+  if (slope_inputs) then
     ! Interpolate the vertical density gradient to center points and build sine-form
     ! slope components, s = grad(rho) / |grad3(rho)|, following the bounded slope
     ! definition in calc_isoneutral_slopes; |s| <= 1 pointwise by construction.
+    ! This construction works with any vertical coordinate: the gradients come from
+    ! calc_isoneutral_slopes (EOS mode) or calc_layered_density_gradients (layered mode).
     call center_drdz(drdz_u, drdz_v, drdz_c, G, GV, CS)
     do K=1, nz+1
       do j=js-shift-1,je+shift+1 ; do i=is-shift-1,ie+shift+1
@@ -286,6 +300,22 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
         endif
       enddo ; enddo
     enddo
+    if (CS%upsilon_form == UPSILON_SLOPE_CLAMP) then
+      ! Input-space bound (Perezhogin): clamp the slope-VECTOR magnitude the network
+      ! sees at slope_max, so the regularization acts on the inputs rather than on the
+      ! output rescaling. Clamping the vector magnitude (not each component) keeps the
+      ! pointwise limit identical to KHTH_SLOPE_MAX and makes the stencil norm bounded
+      ! by 3*slope_max, consistent with the factor-3 convention used elsewhere.
+      do K=1, nz+1
+        do j=js-shift-1,je+shift+1 ; do i=is-shift-1,ie+shift+1
+          s_mag = sqrt( s_x_c(i,j,K)**2 + s_y_c(i,j,K)**2 )
+          if (s_mag > CS%slope_max) then
+            s_x_c(i,j,K) = s_x_c(i,j,K) * (CS%slope_max / s_mag)
+            s_y_c(i,j,K) = s_y_c(i,j,K) * (CS%slope_max / s_mag)
+          endif
+        enddo ; enddo
+      enddo
+    endif
   endif
 
   ! Compute velocity gradients at center points
@@ -306,7 +336,7 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
     m = 0
     do j = js-1, je+1 ; do i = is-1, ie+1
       m = m + 1
-      if (CS%upsilon_form == UPSILON_SLOPE_STENCIL) then
+      if (slope_inputs) then
         ! The density-gradient stencils are replaced by stencils of the bounded slopes.
         ! Their normalized pattern is approximately unchanged (exactly, where the
         ! stratification is uniform across the stencil), so the network trained on
@@ -341,7 +371,7 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
         enddo
       enddo
       vel_grad_mag = sqrt(vel_grad_mag) + vel_grad_neglect
-      if (CS%upsilon_form == UPSILON_SLOPE_STENCIL) then
+      if (slope_inputs) then
         rho_grad_mag = sqrt(rho_grad_mag) + slope_neglect
         ! Limit the stencil-aggregate slope, as GM limits the slope with KHTH_SLOPE_MAX.
         ! The factor of 3 converts the pointwise limit to the 9-point stencil norm.
@@ -382,7 +412,7 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
       ! an implicit contract with the training procedure.
       yy(:) = ((y(m,:) * norm_y(i,j)) * G%areaT(i,j)) * CS%ann_coeff
 
-      if (CS%upsilon_form == UPSILON_SLOPE_STENCIL) then
+      if (slope_inputs) then
         ! Here yy is already the bounded velocity-scale streamfunction Upsilon, with
         ! |Upsilon| <= |ANN| * 3*slope_max * vel_grad_mag * areaT * ann_coeff, so no
         ! flux clamp is needed. The ANN outputs -u'rho', so we negate as below.
@@ -402,7 +432,7 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
   enddo
 
   ! Interpolate the density fluxes (or Upsilon in SLOPE_STENCIL mode) to u and v points.
-  if (CS%upsilon_form == UPSILON_SLOPE_STENCIL) then
+  if (slope_inputs) then
     call center2uv(Upsx_c, Upsy_c, Ups_u, Ups_v, G, GV)
   else
     call center2uv(Fx_c, Fy_c, Fx_u, Fy_v, G, GV)
@@ -453,7 +483,7 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
         endif
         s_hat_u(I,j,K) = rho_norm_u(I,j,K) / mag_grad
         Upsilon_u = (Fx_u(I,j,K)/mag_grad) * G%OBCmaskCu(I,j)
-      case (UPSILON_SLOPE_STENCIL)
+      case (UPSILON_SLOPE_STENCIL, UPSILON_SLOPE_CLAMP)
         ! Upsilon was predicted directly from slope stencils; no division is needed.
         Upsilon_u = Ups_u(I,j,K) * G%OBCmaskCu(I,j)
       end select
@@ -502,7 +532,7 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
         endif
         s_hat_v(i,J,K) = rho_norm_v(i,J,K) / mag_grad
         Upsilon_v = (Fy_v(i,J,K)/mag_grad) * G%OBCmaskCv(i,J)
-      case (UPSILON_SLOPE_STENCIL)
+      case (UPSILON_SLOPE_STENCIL, UPSILON_SLOPE_CLAMP)
         ! Upsilon was predicted directly from slope stencils; no division is needed.
         Upsilon_v = Ups_v(i,J,K) * G%OBCmaskCv(i,J)
       end select
@@ -516,8 +546,8 @@ subroutine meso_sfn_ANN_compute(h, e, sfn_u, sfn_v, G, GV, US, tv, CS, dt, u, v)
 
   call pass_vector(sfn_u, sfn_v, G%Domain)
 
-  if (CS%upsilon_form /= UPSILON_SLOPE_STENCIL) then
-    ! Density fluxes are not part of the SLOPE_STENCIL prediction path.
+  if (.not. slope_inputs) then
+    ! Density fluxes are not part of the slope-input prediction paths.
     if (CS%id_Fx_c > 0) call post_data(CS%id_Fx_c, Fx_c, CS%diag)
     if (CS%id_Fy_c > 0) call post_data(CS%id_Fy_c, Fy_c, CS%diag)
 
@@ -850,12 +880,16 @@ subroutine meso_sfn_ANN_init(Time, G, GV, US, param_file, diag, CS)
              "\t\t MESO_SFN_SLOPE_MAX. \n"//&
              "\t SLOPE_STENCIL - feed the ANN stencils of bounded (sine-form) isopycnal \n"//&
              "\t\t slopes and interpret the rescaled output directly as Upsilon, with \n"//&
-             "\t\t no division.", &
+             "\t\t no division. \n"//&
+             "\t SLOPE_CLAMP - as SLOPE_STENCIL, but the slope-vector magnitude fed to \n"//&
+             "\t\t the network is clamped at MESO_SFN_SLOPE_MAX, so the bound acts on \n"//&
+             "\t\t the network inputs rather than on the output rescaling.", &
              default="LOCAL_GRAD")
   select case (uppercase(trim(upsilon_form_str)))
     case ("LOCAL_GRAD")    ; CS%upsilon_form = UPSILON_LOCAL_GRAD
     case ("STENCIL_GRAD")  ; CS%upsilon_form = UPSILON_STENCIL_GRAD
     case ("SLOPE_STENCIL") ; CS%upsilon_form = UPSILON_SLOPE_STENCIL
+    case ("SLOPE_CLAMP")   ; CS%upsilon_form = UPSILON_SLOPE_CLAMP
     case default
       call MOM_error(FATAL, "meso_sfn_ANN_init: Unrecognized value of "//&
                      "MESO_SFN_UPSILON_FORM = "//trim(upsilon_form_str))
