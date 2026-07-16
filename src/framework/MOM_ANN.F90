@@ -7,7 +7,7 @@ module MOM_ANN
 
 ! This file is part of MOM6. See LICENSE.md for the license
 
-use MOM_io, only : MOM_read_data, field_exists
+use MOM_io, only : MOM_read_data, field_exists, read_attribute
 use MOM_error_handler, only : MOM_error, FATAL, MOM_mesg
 use numerical_testing_type, only : testing
 
@@ -26,6 +26,11 @@ interface ANN_apply
   module procedure ANN_apply_array_sio
 end interface ANN_apply
 
+!> Hidden-layer activation kinds. Selected at init from the model file's "activation" global
+!! attribute; absent => ReLU, so all previously-exported models keep bit-identical behaviour.
+integer, parameter :: ACT_RELU = 0 !< ReLU hidden activation, max(x,0) -- the historical default
+integer, parameter :: ACT_GELU = 1 !< GELU hidden activation, 0.5*x*(1+erf(x/sqrt(2)))
+
 !> Type for a single Linear layer of ANN,
 !! i.e. stores the matrix A and bias b
 !! for matrix-vector multiplication
@@ -34,6 +39,7 @@ type, private :: layer_type ; private
   integer :: output_width        !< Number of rows in matrix A
   integer :: input_width         !< Number of columns in matrix A
   logical :: activation = .True. !< If true, apply the default activation function
+  integer :: act_kind = ACT_RELU !< Which hidden activation to apply when activation is .True.
 
   real, allocatable :: A(:,:) !< Matrix in column-major order
                               !! of size A(output_width, input_width) [nondim]
@@ -84,6 +90,8 @@ subroutine ANN_init(CS, NNfile)
   integer, allocatable :: layer_sizes(:) ! Number of neurons in each layer
   character(len=1) :: layer_num_str
   character(len=3) :: fieldname
+  character(:), allocatable :: act_str  ! Hidden activation name from the model file (e.g. "relu","gelu")
+  logical :: act_found                  ! True if the model file carries an "activation" global attribute
 
   call MOM_mesg('ANN: init from ' // trim(NNfile), 2)
 
@@ -129,6 +137,21 @@ subroutine ANN_init(CS, NNfile)
 
   ! No activation function for the last layer
   CS%layers(CS%num_layers-1)%activation = .False.
+
+  ! Hidden-layer activation kind: ReLU by default, or read from the model file's "activation"
+  ! global attribute. Unknown (offline-only) activations are a hard error rather than a silent
+  ! fall-back to ReLU, which would give wrong fluxes online.
+  call read_attribute(NNfile, "activation", act_str, found=act_found)
+  if (act_found) then
+    if (trim(act_str) == 'gelu') then
+      do i = 1, CS%num_layers-1
+        CS%layers(i)%act_kind = ACT_GELU
+      enddo
+    else if (trim(act_str) /= 'relu' .and. len_trim(act_str) > 0) then
+      call MOM_error(FATAL, "ANN_init: activation '"//trim(act_str)//"' in "//trim(NNfile)// &
+                     "' is not implemented online (only relu and gelu are).")
+    endif
+  endif
 
   if (field_exists(NNfile, 'x_test') .and. field_exists(NNfile, 'y_test') ) &
   call ANN_test(CS, NNfile)
@@ -237,12 +260,18 @@ subroutine ANN_end(CS)
 
 end subroutine ANN_end
 
-!> The default activation function
-pure elemental function activation_fn(x) result (y)
-  real, intent(in) :: x !< Scalar input value [nondim]
-  real             :: y !< Scalar output value [nondim]
+!> The hidden-layer activation function: ReLU by default, or GELU if the model was trained with it.
+pure elemental function activation_fn(x, act_kind) result (y)
+  real,    intent(in) :: x        !< Scalar input value [nondim]
+  integer, intent(in) :: act_kind !< Activation kind (ACT_RELU or ACT_GELU)
+  real                :: y        !< Scalar output value [nondim]
+  real, parameter :: inv_sqrt2 = 0.70710678118654752 ! 1/sqrt(2)
 
-  y = max(x, 0.0) ! ReLU activation
+  if (act_kind == ACT_GELU) then
+    y = 0.5 * x * (1.0 + erf(x * inv_sqrt2)) ! GELU (exact erf form), matches torch.nn.GELU()
+  else
+    y = max(x, 0.0) ! ReLU activation (default)
+  endif
 
 end function activation_fn
 
@@ -302,7 +331,7 @@ subroutine ANN_apply_vector_orig(x, y, CS)
       enddo
     enddo
     ! Apply activation function
-    if (layer%activation) y(:) = activation_fn(y(:))
+    if (layer%activation) y(:) = activation_fn(y(:), layer%act_kind)
 
   end subroutine layer_apply_orig
 end subroutine ANN_apply_vector_orig
@@ -368,7 +397,7 @@ subroutine ANN_apply_vector_oi(x, y, CS)
       enddo
     enddo
     ! Apply activation function
-    if (layer%activation) y(:) = activation_fn(y(:))
+    if (layer%activation) y(:) = activation_fn(y(:), layer%act_kind)
 
   end subroutine layer_apply_oi
 end subroutine ANN_apply_vector_oi
@@ -438,7 +467,7 @@ subroutine ANN_apply_array_sio(nij, x, y, CS)
         y(:,o) = y(:,o) + x(:,i) * layer%A(o, i)
       enddo
       ! Apply activation function
-      if (layer%activation) y(:,o) = activation_fn(y(:,o))
+      if (layer%activation) y(:,o) = activation_fn(y(:,o), layer%act_kind)
     enddo
 
   end subroutine layer_apply_sio
